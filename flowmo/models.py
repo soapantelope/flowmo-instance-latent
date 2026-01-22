@@ -575,21 +575,42 @@ class FlowMo(nn.Module):
         ]
         decoder_params.axes_dim = [(d // 4) * width for d in decoder_params.axes_dim]
 
-        self.encoder = Flux(encoder_params, name="encoder")
+        self.pose_encoder = Flux(encoder_params, name="pose_encoder")
+        self.instance_encoder = Flux(encoder_params, name="instance_encoder")
         self.decoder = Flux(decoder_params, name="decoder")
 
     @torch.compile
+    # encodes pose and instance from an image
     def encode(self, img):
         b, c, h, w = img.shape
 
         img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
+        
         txt = torch.zeros(
             (b, self.code_length, self.encoder_context_dim), device=img.device
         )
 
-        _, code, aux = self.encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+        _, code_pose, aux_pose = self.pose_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+        _, code_instance, aux_instance = self.instance_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
 
-        return code, aux
+        aux = {"aux_pose": aux_pose, "aux_instance": aux_instance}
+        return code_instance, code_pose, aux
+    
+    @torch.no_grad()
+    def encode_pose(self, img): # just going to use this for inference
+        b, c, h, w = img.shape
+        img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
+        txt = torch.zeros((b, self.code_length, self.encoder_context_dim), device=img.device)
+        _, code_pose, _ = self.pose_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+        return code_pose
+    
+    @torch.no_grad()
+    def encode_instance(self, img): # just going to use this for inference
+        b, c, h, w = img.shape
+        img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
+        txt = torch.zeros((b, self.code_length, self.encoder_context_dim), device=img.device)
+        _, code_instance, _ = self.instance_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+        return code_instance
 
     def _decode(self, img, code, timesteps):
         b, c, h, w = img.shape
@@ -670,38 +691,64 @@ class FlowMo(nn.Module):
             raise NotImplementedError
         return code, indices, quantizer_loss
 
+    # takes a batch of quadruplets and returns a batch of v_ests
     def forward(
         self,
-        img,
-        noised_img,
+        batch, # [batch_size, 4, C, H, W] (i adjusted for 4 images in a batch)
+        noised_batch, # [batch_size, 4, C, H, W]
         timesteps,
         enable_cfg=True,
     ):
         aux = {}
 
-        code, encode_aux = self.encode(img)
+        a = batch[:, 0] # instance i, pose p1
+        b = batch[:, 1] # instance i, pose p2
+        c = batch[:, 2] # instance j, pose p1
+        d = batch[:, 3] # instance j, pose p2
 
-        aux["original_code"] = code
+        code_instance_a, code_pose_a, encode_aux_a = self.encode(a)
+        code_instance_b, code_pose_b, encode_aux_b = self.encode(b)
+        code_instance_c, code_pose_c, encode_aux_c = self.encode(c)
+        code_instance_d, code_pose_d, encode_aux_d = self.encode(d)
 
-        b, t, f = code.shape
+        code_a = torch.cat([code_instance_b, code_pose_c], dim=-1)
+        code_b = torch.cat([code_instance_a, code_pose_d], dim=-1)
+        code_c = torch.cat([code_instance_d, code_pose_a], dim=-1)
+        code_d = torch.cat([code_instance_c, code_pose_b], dim=-1)
 
-        code, _, aux["quantizer_loss"] = self._quantize(code)
+        codes = [code_a, code_b, code_c, code_d]
 
-        mask = torch.ones_like(code[..., :1])
-        code = torch.concatenate([code, mask], axis=-1)
-        code_pre_cfg = code
+        # i might be able to do this better if i batch it properly but for now this is simpler
+        v_ests = [] 
+        quantizer_losses = []
+        posttrain_samples = []
+        for i, code in enumerate(codes):
+            b, t, f = code.shape
 
-        if self.config.model.enable_cfg and enable_cfg:
-            cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None]
-            code = code * cfg_mask
+            code, _, quantizer_loss = self._quantize(code)
+            quantizer_losses.append(quantizer_loss)
 
-        v_est, decode_aux = self.decode(noised_img, code, timesteps)
-        aux.update(decode_aux)
+            mask = torch.ones_like(code[..., :1])
+            code = torch.concatenate([code, mask], axis=-1)
+            code_pre_cfg = code
 
+            if self.config.model.enable_cfg and enable_cfg:
+                cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None]
+                code = code * cfg_mask
+
+            v_est, decode_aux = self.decode(noised_batch[:, i], code, timesteps)
+            v_ests.append(v_est)
+
+            if self.config.model.posttrain_sample:
+                posttrain_sample = self.reconstruct_checkpoint(code_pre_cfg)
+                posttrain_samples.append(posttrain_sample)
+
+        v_ests = torch.stack(v_ests, dim=1)
+        aux["quantizer_loss"] = sum(quantizer_losses)
         if self.config.model.posttrain_sample:
-            aux["posttrain_sample"] = self.reconstruct_checkpoint(code_pre_cfg)
+            aux["posttrain_samples"] = torch.stack(posttrain_samples, dim=1) # [B, 4, C, H, W]
 
-        return v_est, aux
+        return v_ests, aux
 
     def reconstruct_checkpoint(self, code):
         with torch.autocast(
@@ -731,14 +778,7 @@ class FlowMo(nn.Module):
         return z
 
     @torch.no_grad()
-    def reconstruct(self, images, dtype=torch.bfloat16, code=None):
-        """
-        Args:
-            images in [bchw] [-1, 1]
-
-        Returns:
-            images in [bchw] [-1, 1]
-        """
+    def generate_from_pose_instance(self, pose_images, instance_images, dtype=torch.bfloat16):
         model = self
         config = self.config.eval.sampling
 
@@ -746,11 +786,13 @@ class FlowMo(nn.Module):
             "cuda",
             dtype=dtype,
         ):
-            bs, c, h, w = images.shape
-            if code is None:
-                x = images.cuda()
-                prequantized_code = model.encode(x)[0].cuda()
-                code, _, _ = model._quantize(prequantized_code)
+            bs, c, h, w = pose_images.shape
+
+            pose_code = self.encode_pose(pose_images.cuda())
+            instance_code = self.encode_instance(instance_images.cuda())
+
+            code = torch.cat([instance_code, pose_code], dim=-1)
+            code, _, _ = self._quantize(code)
 
             z = torch.randn((bs, 3, h, w)).cuda()
 
@@ -771,11 +813,55 @@ class FlowMo(nn.Module):
             )[-1].clip(-1, 1)
         return samples.to(torch.float32)
 
+    @torch.no_grad()
+    def reconstruct(self, images, dtype=torch.bfloat16, code=None):
+        """
+        Args:
+            images in [bchw] [-1, 1]
 
-def rf_loss(config, model, batch, aux_state):
-    x = batch["image"]
+        Returns:
+            images in [bchw] [-1, 1]
+        """
+
+        return self.generate_from_pose_instance(images, images, dtype=dtype)
+        # model = self
+        # config = self.config.eval.sampling
+
+        # with torch.autocast(
+        #     "cuda",
+        #     dtype=dtype,
+        # ):
+        #     bs, c, h, w = images.shape
+        #     if code is None:
+        #         x = images.cuda()
+        #         prequantized_code = model.encode(x)[0].cuda()
+        #         code, _, _ = model._quantize(prequantized_code)
+
+        #     z = torch.randn((bs, 3, h, w)).cuda()
+
+        #     mask = torch.ones_like(code[..., :1])
+        #     code = torch.concatenate([code * mask, mask], axis=-1)
+
+        #     cfg_mask = 0.0
+        #     null_code = code * cfg_mask if config.cfg != 1.0 else None
+
+        #     samples = rf_sample(
+        #         model,
+        #         z,
+        #         code,
+        #         null_code=null_code,
+        #         sample_steps=config.sample_steps,
+        #         cfg=config.cfg,
+        #         schedule=config.schedule,
+        #     )[-1].clip(-1, 1)
+        # return samples.to(torch.float32)
+
+
+def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 4, 3, H, W]
+
+    x = batch["images"]
     b = x.size(0)
-
+    
     if config.opt.schedule == "lognormal":
         nt = torch.randn((b,)).to(x.device)
         t = torch.sigmoid(nt)
@@ -791,41 +877,43 @@ def rf_loss(config, model, batch, aux_state):
     else:
         raise NotImplementedError
 
-    t = t.view([b, *([1] * len(x.shape[1:]))])
+    t_expanded = t.view(b, 1, 1, 1, 1)
     z1 = torch.randn_like(x)
-    zt = (1 - t) * x + t * z1
+    zt = (1 - t_expanded) * x + t_expanded * z1
 
     zt, t = zt.to(x.dtype), t.to(x.dtype)
 
-    vtheta, aux = model(
-        img=x,
-        noised_img=zt,
-        timesteps=t.reshape((b,)),
+    vthetas, aux = model(
+        batch=x,
+        noised_batch=zt,
+        timesteps=t,
     )
 
-    diff = z1 - vtheta - x
-    x_pred = zt - vtheta * t
+    diff = z1 - vthetas - x
+    x_preds = zt - vthetas * t_expanded
 
-    loss = ((diff) ** 2).mean(dim=list(range(1, len(x.shape))))
-    loss = loss.mean()
+    loss = ((diff) ** 2).mean()
 
     aux["loss_dict"] = {}
     aux["loss_dict"]["diffusion_loss"] = loss
     aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"]
 
     if config.opt.lpips_weight != 0.0:
-        aux_loss = 0.0
         if config.model.posttrain_sample:
-            x_pred = aux["posttrain_sample"]
+            x_preds = aux["posttrain_samples"]
 
-        lpips_dist = aux_state["lpips_model"](x, x_pred)
-        lpips_dist = (config.opt.lpips_weight * lpips_dist).mean() + aux_loss
+        x_flat = x.view(b * 4, *x.shape[2:])
+        x_preds_flat = x_preds.view(b * 4, *x_preds.shape[2:])
+
+        lpips_dist = aux_state["lpips_model"](x_flat, x_preds_flat)
+        lpips_dist = (config.opt.lpips_weight * lpips_dist).mean()
         aux["loss_dict"]["lpips_loss"] = lpips_dist
     else:
         lpips_dist = 0.0
 
     loss = loss + aux["quantizer_loss"] + lpips_dist
     aux["loss_dict"]["total_loss"] = loss
+
     return loss, aux
 
 

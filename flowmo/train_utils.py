@@ -86,18 +86,31 @@ def bfloat16_is_available():
 def wrap_dataloader(dataloader):
     while True:
         for batch in dataloader:
-            new_batch = {
-                k: v.permute(0, 3, 1, 2).to("cuda")
-                for (k, v) in batch.items()
-                if k
-                in [
-                    "image",
-                ]
-            }
-            yield new_batch
+            # new_batch = {
+            #     k: v.permute(0, 3, 1, 2).to("cuda")
+            #     for (k, v) in batch.items()
+            #     if k in ["images"]
+            # }
+            images = batch["images"].permute(0, 1, 4, 2, 3).to("cuda")
+            yield {"images": images}
 
 
 def load_dataset(config, split, shuffle_val=False):
+    if config.data.quadruplet_dataset_root:
+        dataset = data.QuadrupletDataset(
+            config.data.quadruplet_dataset_root,
+            size=config.data.image_size,
+            random_crop=(split == "train"),
+        )
+        return DataLoader(
+            dataset,
+            batch_size=config.data.batch_size,
+            num_workers=config.data.num_workers,
+            shuffle=(split == "train"),
+            pin_memory=True,
+            drop_last=(split == "train"),
+        )
+
     if split == "train":
         dataset = data.IndexedTarDataset(
             config.data.imagenet_train_tar,
