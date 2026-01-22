@@ -561,7 +561,7 @@ class FlowMo(nn.Module):
         )
         decoder_params = FluxParams(
             in_channels=3 * patch_size**2,
-            context_dim=context_dim + 1,
+            context_dim=context_dim * 2 + 1,  # instance + pose + mask
             patch_size=patch_size,
             depth=dec_depth,
             **DIT_ZOO[self.dit_mode],

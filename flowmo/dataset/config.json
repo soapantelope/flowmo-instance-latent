@@ -1,0 +1,47 @@
+{
+  "image_size": 256,
+  "background_color": [
+    255,
+    255,
+    255
+  ],
+  "num_types": 50,
+  "images_per_type": 200,
+  "body_width_range": [
+    40,
+    80
+  ],
+  "body_height_range": [
+    100,
+    180
+  ],
+  "string_length_range": [
+    0.3,
+    0.9
+  ],
+  "string_thickness_range": [
+    2,
+    3
+  ],
+  "string_color": [
+    50,
+    50,
+    50
+  ],
+  "angle_range": [
+    -90.0,
+    90.0
+  ],
+  "weight_size_range": [
+    10,
+    20
+  ],
+  "weight_shapes": [
+    "circle",
+    "square",
+    "triangle"
+  ],
+  "output_dir": "dataset",
+  "save_metadata": true,
+  "seed": 42
+}

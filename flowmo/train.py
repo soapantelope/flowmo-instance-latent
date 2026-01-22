@@ -40,7 +40,7 @@ def train_step(config, model, batch, optimizer, aux_state):
     total_loss = 0
 
     optimizer.zero_grad()
-    b = batch["image"].shape[0]
+    b = batch["images"].shape[0]
     chunksize = b // config.opt.n_grad_acc
     batch_chunks = [
         {k: v[i * chunksize : (i + 1) * chunksize] for (k, v) in batch.items()}
@@ -128,14 +128,20 @@ def main(args, config):
         else:
             opt_cls = optim.Adam
 
-    encoder_pg = {
-        "params": [p for (n, p) in model.named_parameters() if "encoder" in n]
+    pose_encoder_pg = {
+        "params": [p for (n, p) in model.named_parameters() if "pose_encoder" in n]
+    }
+    instance_encoder_pg = {
+        "params": [p for (n, p) in model.named_parameters() if "instance_encoder" in n]
     }
     decoder_pg = {
         "params": [p for (n, p) in model.named_parameters() if "decoder" in n]
     }
-    assert set(encoder_pg["params"]).union(set(decoder_pg["params"])) == set(
-        model.parameters()
+    assert (
+        set(pose_encoder_pg["params"])
+        .union(set(instance_encoder_pg["params"]))
+        .union(set(decoder_pg["params"]))
+        == set(model.parameters())
     )
 
     def build_optimizer(pgs):
@@ -147,7 +153,7 @@ def main(args, config):
         )
         return optimizer
 
-    optimizer = build_optimizer([encoder_pg, decoder_pg])
+    optimizer = build_optimizer([pose_encoder_pg, instance_encoder_pg, decoder_pg])
     rebuilt_optimizer = False
 
     train_dataloader = train_utils.load_dataset(config, split='train')
@@ -214,7 +220,8 @@ def main(args, config):
                 print(f"Rebuilding optimizer at step {total_steps}")
                 optimizer = build_optimizer([decoder_pg])
                 rebuilt_optimizer = True
-                model.module.encoder.requires_grad_(False)
+                model.module.pose_encoder.requires_grad_(False)
+                model.module.instance_encoder.requires_grad_(False)
                 model_ema.decay = config.model.ema_decay
 
         dl_tic = time.time()
@@ -222,7 +229,7 @@ def main(args, config):
         dl_toc = time.time()
         if dl_toc - dl_tic > 1.0:
             print(f"Dataloader took {dl_toc - dl_tic} seconds!")
-        images = batch["image"]
+        images = batch["images"]
 
         aux_state["total_steps"] = total_steps
 
@@ -269,10 +276,14 @@ def main(args, config):
             allocated_gb = torch.cuda.max_memory_allocated() / 1e9
 
             with torch.no_grad():
-                encoder_checksum = sum(
-                    p.mean() for p in model.module.encoder.parameters()
+                pose_encoder_checksum = sum(
+                    p.mean() for p in model.module.pose_encoder.parameters()
                 ).item()
-                running_losses["encoder_checksum"] = encoder_checksum
+                instance_encoder_checksum = sum(
+                    p.mean() for p in model.module.instance_encoder.parameters()
+                ).item()
+                running_losses["pose_encoder_checksum"] = pose_encoder_checksum
+                running_losses["instance_encoder_checksum"] = instance_encoder_checksum
 
             print(
                 dict(

@@ -1,7 +1,7 @@
 global_seed: 0
 
 data:
-  batch_size: 16
+  batch_size: 8
   eval_batch_size: 5
   image_size: 256
   num_workers: 8
@@ -11,7 +11,7 @@ data:
   imagenet_val_index: "imagenet_val_index_overall.json"
   imagenet_val_tar: "ILSVRC2012_img_val.tar"
 
-  quadruplet_dataset_root: "TODO: add path"
+  quadruplet_dataset_root: "flowmo/dataset/images"
 
 model:
   enable_mup: True
