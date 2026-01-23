@@ -379,8 +379,8 @@ def main():
                         help="Directory to save visualizations")
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to run inference on")
-    parser.add_argument("--use-ema", action="store_true", default=True,
-                        help="Use EMA model weights")
+    parser.add_argument("--use-ema", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use EMA model weights (use --no-use-ema to disable)")
     parser.add_argument("--config", type=str, 
                         default="results/flowmo_instance_pretrain/config.yaml",
                         help="Path to config file (use training config for matching architecture)")
