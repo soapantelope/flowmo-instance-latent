@@ -259,9 +259,9 @@ def main(args, config):
             print(images.min(), images.max(), images.mean())
 
         # Refresh dataloader
-        if total_steps % 10_000 == 0:
-            train_dataloader = train_utils.load_dataset(config, split='train')
-            dl_iter = iter(train_utils.wrap_dataloader(train_dataloader))
+        # if total_steps % 10_000 == 0:
+        #     train_dataloader = train_utils.load_dataset(config, split='train')
+        #     dl_iter = iter(train_utils.wrap_dataloader(train_dataloader))
 
         if total_steps % config.trainer.log_every == 0:
             toc = time.time()
