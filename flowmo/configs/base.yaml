@@ -54,6 +54,7 @@ opt:
   log_norms: True
   lpips_weight: 0.1
   lpips_mode: "vgg"
+  contrastive_loss_weight: 1.0
 
   beta1: .9
   beta2: .95
