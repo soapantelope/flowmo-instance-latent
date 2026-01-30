@@ -22,12 +22,16 @@ model:
   fix_initial_norms: True
   fix_norm_mode: l2
 
-  quantization_type: lfq
+  # VAE latent settings
   code_length: 256
   context_dim: 18
+  kl_weight: 0.001  # Weight for KL divergence regularization
+
+  # Legacy quantization settings (no longer used, kept for compatibility)
+  quantization_type: noop
   codebook_size_for_entropy: 9
-  entropy_loss_weight: 0.0025
-  commit_loss_weight: 0.000625
+  entropy_loss_weight: 0.0
+  commit_loss_weight: 0.0
 
   enc_depth: 8
   dec_depth: 16

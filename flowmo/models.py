@@ -16,8 +16,6 @@ from einops import rearrange, repeat
 from mup import MuReadout
 from torch import Tensor, nn
 
-from flowmo import lookup_free_quantize
-
 MUP_ENABLED = True
 
 
@@ -535,17 +533,8 @@ class FlowMo(nn.Module):
         self.code_length = code_length
         self.dit_mode = "dit_b_4"
         self.context_dim = context_dim
-        self.encoder_context_dim = context_dim * (
-            1 + (self.config.model.quantization_type == "kl")
-        )
-
-        if config.model.quantization_type == "lfq":
-            self.quantizer = lookup_free_quantize.LFQ(
-                codebook_size=2**self.config.model.codebook_size_for_entropy,
-                dim=self.config.model.codebook_size_for_entropy,
-                num_codebooks=1,
-                token_factorization=False,
-            )
+        # Always output 2x context_dim for VAE (mean + logvar)
+        self.encoder_context_dim = context_dim * 2
 
         if self.config.model.enc_mup_width is not None:
             enc_width = self.config.model.enc_mup_width
@@ -597,20 +586,36 @@ class FlowMo(nn.Module):
         return code_instance, code_pose, aux
     
     @torch.no_grad()
-    def encode_pose(self, img): # just going to use this for inference
+    def encode_pose(self, img, deterministic=True): 
+        """Encode pose from image. Returns sampled latent from VAE distribution.
+        
+        Args:
+            img: [b, c, h, w] input image
+            deterministic: if True, return mean (default for inference)
+        """
         b, c, h, w = img.shape
         img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
         txt = torch.zeros((b, self.code_length, self.encoder_context_dim), device=img.device)
         _, code_pose, _ = self.pose_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
-        return code_pose
+        # Sample from distribution (use mean for deterministic inference)
+        code_pose_sampled, _ = self._sample_from_distribution(code_pose, deterministic=deterministic)
+        return code_pose_sampled
     
     @torch.no_grad()
-    def encode_instance(self, img): # just going to use this for inference
+    def encode_instance(self, img, deterministic=True):
+        """Encode instance from image. Returns sampled latent from VAE distribution.
+        
+        Args:
+            img: [b, c, h, w] input image
+            deterministic: if True, return mean (default for inference)
+        """
         b, c, h, w = img.shape
         img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
         txt = torch.zeros((b, self.code_length, self.encoder_context_dim), device=img.device)
         _, code_instance, _ = self.instance_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
-        return code_instance
+        # Sample from distribution (use mean for deterministic inference)
+        code_instance_sampled, _ = self._sample_from_distribution(code_instance, deterministic=deterministic)
+        return code_instance_sampled
 
     def _decode(self, img, code, timesteps):
         b, c, h, w = img.shape
@@ -641,55 +646,34 @@ class FlowMo(nn.Module):
             use_reentrant=False,
         )
 
-    @torch.compile
-    def _quantize(self, code):
+    def _sample_from_distribution(self, code, deterministic=False):
         """
+        Sample from VAE distribution (reparameterization trick).
+        
         Args:
-            code: [b codelength context dim]
+            code: [b, t, 2*context_dim] where first half is mean, second half is logvar
+            deterministic: if True, return mean instead of sampling (for inference)
 
         Returns:
-            quantized code of the same shape
+            sampled: [b, t, context_dim]
+            kl_loss: scalar KL divergence against N(0, I)
         """
-        b, t, f = code.shape
-        indices = None
-        if self.config.model.quantization_type == "noop":
-            quantized = code
-            quantizer_loss = torch.tensor(0.0).to(code.device)
-        elif self.config.model.quantization_type == "kl":
-            # colocating features of same token before split is maybe slightly
-            # better?
-            mean, logvar = _get_diagonal_gaussian(
-                einops.rearrange(code, "b t f -> b (f t)")
-            )
-            code = einops.rearrange(
-                _sample_diagonal_gaussian(mean, logvar),
-                "b (f t) -> b t f",
-                f=f // 2,
-                t=t,
-            )
-            quantizer_loss = _kl_diagonal_gaussian(mean, logvar)
-        elif self.config.model.quantization_type == "lfq":
-            assert f % self.config.model.codebook_size_for_entropy == 0, f
-            code = einops.rearrange(
-                code,
-                "b t (fg fh) -> b fg (t fh)",
-                fg=self.config.model.codebook_size_for_entropy,
-            )
-
-            (quantized, entropy_aux_loss, indices), breakdown = self.quantizer(
-                code, return_loss_breakdown=True
-            )
-            assert quantized.shape == code.shape
-            quantized = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
-
-            quantizer_loss = (
-                entropy_aux_loss * self.config.model.entropy_loss_weight
-                + breakdown.commitment * self.config.model.commit_loss_weight
-            )
-            code = quantized
+        mean, logvar = torch.chunk(code, 2, dim=-1)
+        logvar = torch.clamp(logvar, -30.0, 20.0)
+        
+        if deterministic:
+            sampled = mean
         else:
-            raise NotImplementedError
-        return code, indices, quantizer_loss
+            # Reparameterization trick
+            std = torch.exp(0.5 * logvar)
+            sampled = mean + std * torch.randn_like(mean)
+        
+        # KL divergence against standard normal N(0, I)
+        # KL = 0.5 * sum(mu^2 + sigma^2 - 1 - log(sigma^2))
+        var = torch.exp(logvar)
+        kl_loss = 0.5 * torch.mean(torch.sum(mean**2 + var - 1.0 - logvar, dim=-1))
+        
+        return sampled, kl_loss
 
     # takes a batch of quadruplets and returns a batch of v_ests
     def forward(
@@ -706,34 +690,48 @@ class FlowMo(nn.Module):
         c = batch[:, 2] # instance j, pose p1
         d = batch[:, 3] # instance j, pose p2
 
+        # Encode all images (each returns [b, code_length, 2*context_dim] for mean+logvar)
         code_instance_a, code_pose_a, encode_aux_a = self.encode(a)
         code_instance_b, code_pose_b, encode_aux_b = self.encode(b)
         code_instance_c, code_pose_c, encode_aux_c = self.encode(c)
         code_instance_d, code_pose_d, encode_aux_d = self.encode(d)
 
-        code_a = torch.cat([code_instance_b, code_pose_c], dim=-1)
-        code_b = torch.cat([code_instance_a, code_pose_d], dim=-1)
-        code_c = torch.cat([code_instance_d, code_pose_a], dim=-1)
-        code_d = torch.cat([code_instance_c, code_pose_b], dim=-1)
+        # Sample from VAE distributions BEFORE concatenation
+        # This ensures we properly separate mean/logvar for each encoder
+        code_instance_a_sampled, kl_instance_a = self._sample_from_distribution(code_instance_a)
+        code_instance_b_sampled, kl_instance_b = self._sample_from_distribution(code_instance_b)
+        code_instance_c_sampled, kl_instance_c = self._sample_from_distribution(code_instance_c)
+        code_instance_d_sampled, kl_instance_d = self._sample_from_distribution(code_instance_d)
+        
+        code_pose_a_sampled, kl_pose_a = self._sample_from_distribution(code_pose_a)
+        code_pose_b_sampled, kl_pose_b = self._sample_from_distribution(code_pose_b)
+        code_pose_c_sampled, kl_pose_c = self._sample_from_distribution(code_pose_c)
+        code_pose_d_sampled, kl_pose_d = self._sample_from_distribution(code_pose_d)
+
+        # Total KL loss from all encodings
+        kl_loss = (kl_instance_a + kl_instance_b + kl_instance_c + kl_instance_d +
+                   kl_pose_a + kl_pose_b + kl_pose_c + kl_pose_d)
+
+        # Concatenate sampled codes (now [b, code_length, 2*context_dim] after concat)
+        code_a = torch.cat([code_instance_b_sampled, code_pose_c_sampled], dim=-1)
+        code_b = torch.cat([code_instance_a_sampled, code_pose_d_sampled], dim=-1)
+        code_c = torch.cat([code_instance_d_sampled, code_pose_a_sampled], dim=-1)
+        code_d = torch.cat([code_instance_c_sampled, code_pose_b_sampled], dim=-1)
 
         codes = [code_a, code_b, code_c, code_d]
 
-        # i might be able to do this better if i batch it properly but for now this is simpler
+        # Decode each code
         v_ests = [] 
-        quantizer_losses = []
         posttrain_samples = []
         for i, code in enumerate(codes):
-            b, t, f = code.shape
-
-            code, _, quantizer_loss = self._quantize(code)
-            quantizer_losses.append(quantizer_loss)
+            bs, t, f = code.shape
 
             mask = torch.ones_like(code[..., :1])
             code = torch.concatenate([code, mask], axis=-1)
             code_pre_cfg = code
 
             if self.config.model.enable_cfg and enable_cfg:
-                cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None]
+                cfg_mask = (torch.rand((bs,), device=code.device) > 0.1)[:, None, None]
                 code = code * cfg_mask
 
             v_est, decode_aux = self.decode(noised_batch[:, i], code, timesteps)
@@ -744,7 +742,8 @@ class FlowMo(nn.Module):
                 posttrain_samples.append(posttrain_sample)
 
         v_ests = torch.stack(v_ests, dim=1)
-        aux["quantizer_loss"] = sum(quantizer_losses)
+        aux["kl_loss"] = kl_loss
+        aux["quantizer_loss"] = kl_loss  # Keep this key for backward compatibility with rf_loss
         if self.config.model.posttrain_sample:
             aux["posttrain_samples"] = torch.stack(posttrain_samples, dim=1) # [B, 4, C, H, W]
 
@@ -778,7 +777,15 @@ class FlowMo(nn.Module):
         return z
 
     @torch.no_grad()
-    def generate_from_pose_instance(self, pose_images, instance_images, dtype=torch.bfloat16):
+    def generate_from_pose_instance(self, pose_images, instance_images, dtype=torch.bfloat16, deterministic=True):
+        """Generate images from pose and instance codes.
+        
+        Args:
+            pose_images: images to extract pose from
+            instance_images: images to extract instance/identity from
+            dtype: computation dtype
+            deterministic: if True, use mean of latent distribution (default for inference)
+        """
         model = self
         config = self.config.eval.sampling
 
@@ -788,11 +795,12 @@ class FlowMo(nn.Module):
         ):
             bs, c, h, w = pose_images.shape
 
-            pose_code = self.encode_pose(pose_images.cuda())
-            instance_code = self.encode_instance(instance_images.cuda())
+            # encode_pose and encode_instance now return sampled latents directly
+            pose_code = self.encode_pose(pose_images.cuda(), deterministic=deterministic)
+            instance_code = self.encode_instance(instance_images.cuda(), deterministic=deterministic)
 
+            # Concatenate the already-sampled codes (no quantization needed)
             code = torch.cat([instance_code, pose_code], dim=-1)
-            code, _, _ = self._quantize(code)
 
             z = torch.randn((bs, 3, h, w)).cuda()
 
@@ -894,9 +902,14 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 4, 3, H, W
 
     loss = ((diff) ** 2).mean()
 
+    # Get KL weight from config (default to 0.001 if not specified)
+    kl_weight = getattr(config.model, 'kl_weight', 0.001)
+    weighted_kl_loss = aux["kl_loss"] * kl_weight
+
     aux["loss_dict"] = {}
     aux["loss_dict"]["diffusion_loss"] = loss
-    aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"]
+    aux["loss_dict"]["kl_loss"] = aux["kl_loss"]  # Raw KL loss for logging
+    aux["loss_dict"]["weighted_kl_loss"] = weighted_kl_loss  # Weighted KL loss
 
     if config.opt.lpips_weight != 0.0:
         if config.model.posttrain_sample:
@@ -911,7 +924,7 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 4, 3, H, W
     else:
         lpips_dist = 0.0
 
-    loss = loss + aux["quantizer_loss"] + lpips_dist
+    loss = loss + weighted_kl_loss + lpips_dist
     aux["loss_dict"]["total_loss"] = loss
 
     return loss, aux
