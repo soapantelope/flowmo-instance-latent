@@ -19,7 +19,7 @@ class PairDataset(Dataset):
         self.cropper = T.RandomCrop((size, size)) if random_crop else T.CenterCrop((size, size))
         self.preprocessor = T.Compose([self.rescaler, self.cropper])
         
-        self.instances = defaultdict(str)
+        self.instances = []
         self.instance_to_frames = defaultdict(list) # instance : list of its frames
 
         self.num_frames = 0
@@ -43,20 +43,20 @@ class PairDataset(Dataset):
                 image = np.array(image)
                 image = (image / 127.5 - 1.0).astype(np.float32)
                 
-                if instance not in instance_to_frames:
+                if instance not in self.instance_to_frames:
                     self.instances.append(instance)
 
                 self.instance_to_frames[instance].append(image)
                 self.num_frames += 1
                 
-        print(f"all {len(image_paths)} images loaded into memory!")
+        print(f"all images loaded into memory!")
     
     def __len__(self):
-        return self.num_instances # each epoch will just be num_instances pairs
+        return len(self.instances) * 100 # each epoch will just be num_instances pairs * 100 random pairs
     
     def __getitem__(self, idx):
-        p1 = random.sample(self.instance_to_frames[self.instances[idx]], 2)
-        p2 = random.sample(self.instance_to_frames[self.instances[idx]], 2)
+        idx %= len(self.instances)
+        p1, p2 = random.sample(self.instance_to_frames[self.instances[idx]], 2)
         
         return {
             "images": np.stack([p1, p2], axis=0),

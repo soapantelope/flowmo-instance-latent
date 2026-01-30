@@ -15,6 +15,7 @@ import torch
 from einops import rearrange, repeat
 from mup import MuReadout
 from torch import Tensor, nn
+import torch.nn.functional as F
 
 from flowmo import lookup_free_quantize
 
@@ -714,7 +715,7 @@ class FlowMo(nn.Module):
         similarity_matrix = torch.matmul(codes, codes.T) / temp
 
         labels = torch.cat([
-            torch.arange([B, 2*B, device=codes.device]), 
+            torch.arange(B, 2*B, device=codes.device), 
             torch.arange(0, B, device=codes.device),
         ])
 
@@ -751,7 +752,7 @@ class FlowMo(nn.Module):
         codes = [code_a_recon, code_a_swap, code_b_recon, code_b_swap]
 
         # implement infoNCE contrastive loss on entire batch
-        instance_contrastive_loss = self.compute_infonce_loss(self, code_instance_a, code_instance_b)
+        instance_contrastive_loss = self.compute_infonce_loss(code_instance_a, code_instance_b)
         aux["instance_contrastive_loss"] = instance_contrastive_loss
 
         # i might be able to do this better if i batch it properly but for now this is simpler
@@ -772,7 +773,7 @@ class FlowMo(nn.Module):
                 cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None]
                 code = code * cfg_mask
 
-            v_est, decode_aux = self.decode(noised_batch[:, i / 2], code, timesteps)
+            v_est, decode_aux = self.decode(noised_batch[:, i // 2], code, timesteps)
             v_ests.append(v_est)
 
             if self.config.model.posttrain_sample:
@@ -893,9 +894,17 @@ class FlowMo(nn.Module):
         # return samples.to(torch.float32)
 
 
-def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 4, 3, H, W]
+def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W]
 
     x = batch["images"]
+
+    x = torch.stack([
+        x[:, 0], # b recon
+        x[:, 0], # b swap
+        x[:, 1], # b recon
+        x[:, 1], # b swap
+    ], dim=1)
+    
     b = x.size(0)
     
     if config.opt.schedule == "lognormal":
@@ -939,8 +948,8 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 4, 3, H, W
         if config.model.posttrain_sample:
             x_preds = aux["posttrain_samples"]
 
-        x_flat = x.view(b * 4, *x.shape[2:])
-        x_preds_flat = x_preds.view(b * 4, *x_preds.shape[2:])
+        x_flat = x.reshape(b * 4, *x.shape[2:])
+        x_preds_flat = x_preds.reshape(b * 4, *x_preds.shape[2:])
 
         lpips_dist = aux_state["lpips_model"](x_flat, x_preds_flat)
         lpips_dist = (config.opt.lpips_weight * lpips_dist).mean()
