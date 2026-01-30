@@ -10,7 +10,7 @@ import torchvision.transforms as T
 from PIL import Image
 from torch.utils.data import Dataset
 
-class QuadrupletDataset(Dataset):
+class PairDataset(Dataset):
     def __init__(self, data_root, size=256, random_crop=False):
         self.data_root = data_root
         self.size = size
@@ -19,96 +19,47 @@ class QuadrupletDataset(Dataset):
         self.cropper = T.RandomCrop((size, size)) if random_crop else T.CenterCrop((size, size))
         self.preprocessor = T.Compose([self.rescaler, self.cropper])
         
-        self.instance_pose_to_images = defaultdict(list)
-        self.instances_list = []
-        self.poses_list = []
-        self.quadruplets = []
-        
+        self.instances = defaultdict(str)
+        self.instance_to_frames = defaultdict(list) # instance : list of its frames
+
+        self.num_frames = 0
         self._load_all_images(data_root)
-        self._generate_quadruplets()
     
     def _load_all_images(self, data_root):
         print("loading images")
         
-        image_paths = []
-        image_metadata = []
-        instances = set()
-        poses = set()
-        
         for root, dirs, files in os.walk(data_root):
-            for file in files:
+            for i, file in enumerate(files):
                 if not file.lower().endswith(('.png', '.jpg', '.jpeg')):
                     continue
-                instance, pose_with_ext = file.rsplit('_', 1)
-                pose = pose_with_ext.rsplit('.', 1)[0]
-                
-                instances.add(instance)
-                poses.add(pose)
-                
+                if i % 500 == 0:
+                    print(f"{i} images loaded into memory so far...")
+
+                instance, _ = file.rsplit('_', 1)
+
                 path = os.path.join(root, file)
-                image_paths.append(path)
-                image_metadata.append((instance, pose))
-        
-        self.instances_list = list(instances)
-        self.poses_list = list(poses)
-        
-        print(f"{len(image_paths)} images with {len(self.instances_list)} instances and {len(self.poses_list)} poses")
-        print("loading all images into memory...")
-        
-        for i, (path, (instance, pose)) in enumerate(zip(image_paths, image_metadata)):
-            if i % 500 == 0:
-                print(f"  Loaded {i}/{len(image_paths)} images...")
-            
-            image = Image.open(path).convert("RGB")
-            image = self.preprocessor(image)
-            image = np.array(image)
-            image = (image / 127.5 - 1.0).astype(np.float32)
-            
-            self.instance_pose_to_images[(instance, pose)].append(image)
-        
+                image = Image.open(path).convert("RGB")
+                image = self.preprocessor(image)
+                image = np.array(image)
+                image = (image / 127.5 - 1.0).astype(np.float32)
+                
+                if instance not in instance_to_frames:
+                    self.instances.append(instance)
+
+                self.instance_to_frames[instance].append(image)
+                self.num_frames += 1
+                
         print(f"all {len(image_paths)} images loaded into memory!")
-        print(f"{len(self.instance_pose_to_images)} (instance, pose) combos")
-    
-    def _generate_quadruplets(self):
-        instances_shuffled = self.instances_list.copy()
-        poses_shuffled = self.poses_list.copy()
-        random.shuffle(instances_shuffled)
-        random.shuffle(poses_shuffled)
-        
-        instance_pairs = [(instances_shuffled[i], instances_shuffled[i+1]) 
-                          for i in range(0, len(instances_shuffled) - 1, 2)]
-        pose_pairs = [(poses_shuffled[i], poses_shuffled[i+1]) 
-                      for i in range(0, len(poses_shuffled) - 1, 2)]
-        
-        self.quadruplets = [
-            (inst_i, inst_j, pose_p1, pose_p2)
-            for (inst_i, inst_j) in instance_pairs
-            for (pose_p1, pose_p2) in pose_pairs
-        ]
-        print(f"{len(self.quadruplets)} quadruplets")
-    
-    def shuffle(self):
-        random.shuffle(self.quadruplets)
-    
-    def _get_image(self, instance, pose):
-        images = self.instance_pose_to_images[(instance, pose)]
-        return random.choice(images)
     
     def __len__(self):
-        return len(self.quadruplets)
+        return self.num_instances # each epoch will just be num_instances pairs
     
     def __getitem__(self, idx):
-        instance_i, instance_j, pose_p1, pose_p2 = self.quadruplets[idx]
-
-        a = self._get_image(instance_i, pose_p1)
-        b = self._get_image(instance_i, pose_p2)
-        c = self._get_image(instance_j, pose_p1)
-        d = self._get_image(instance_j, pose_p2)
-
-        quadruplet = np.stack([a, b, c, d], axis=0)
+        p1 = random.sample(self.instance_to_frames[self.instances[idx]], 2)
+        p2 = random.sample(self.instance_to_frames[self.instances[idx]], 2)
         
         return {
-            "images": quadruplet,
+            "images": np.stack([p1, p2], axis=0),
         }
 
 

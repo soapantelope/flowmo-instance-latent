@@ -96,9 +96,9 @@ def wrap_dataloader(dataloader):
 
 
 def load_dataset(config, split, shuffle_val=False):
-    if config.data.quadruplet_dataset_root:
-        dataset = data.QuadrupletDataset(
-            config.data.quadruplet_dataset_root,
+    if config.data.pair_dataset_root:
+        dataset = data.PairDataset(
+            config.data.pair_dataset_root,
             size=config.data.image_size,
             random_crop=(split == "train"),
         )
