@@ -696,7 +696,6 @@ class FlowMo(nn.Module):
         code_instance_c, code_pose_c, encode_aux_c = self.encode(c)
         code_instance_d, code_pose_d, encode_aux_d = self.encode(d)
 
-<<<<<<< Updated upstream
         # Sample from VAE distributions BEFORE concatenation
         # This ensures we properly separate mean/logvar for each encoder
         code_instance_a_sampled, kl_instance_a = self._sample_from_distribution(code_instance_a)
@@ -718,38 +717,6 @@ class FlowMo(nn.Module):
         code_b = torch.cat([code_instance_a_sampled, code_pose_d_sampled], dim=-1)
         code_c = torch.cat([code_instance_d_sampled, code_pose_a_sampled], dim=-1)
         code_d = torch.cat([code_instance_c_sampled, code_pose_b_sampled], dim=-1)
-=======
-        # contrastive loss between instance encodings
-        # Average pool over sequence dimension to get a single vector per instance
-        instance_a = code_instance_a.mean(dim=1)  # [B, context_dim]
-        instance_b = code_instance_b.mean(dim=1)  # [B, context_dim]
-        instance_c = code_instance_c.mean(dim=1)  # [B, context_dim]
-        instance_d = code_instance_d.mean(dim=1)  # [B, context_dim]
-        
-        # Normalize to unit vectors for cosine distance
-        instance_a = torch.nn.functional.normalize(instance_a, p=2, dim=1)
-        instance_b = torch.nn.functional.normalize(instance_b, p=2, dim=1)
-        instance_c = torch.nn.functional.normalize(instance_c, p=2, dim=1)
-        instance_d = torch.nn.functional.normalize(instance_d, p=2, dim=1)
-        
-        # Pull: minimize distance between positive pairs (same instance, different poses)
-        # Use squared L2 distance: ||x - y||^2 = 2 - 2*cos(x,y) for normalized vectors
-        pull_ab = ((instance_a - instance_b) ** 2).sum(dim=1).mean()  # [B] -> scalar
-        pull_cd = ((instance_c - instance_d) ** 2).sum(dim=1).mean()  # [B] -> scalar
-        pull_loss = (pull_ab + pull_cd) / 2.0
-        
-        # Push: maximize distance between negative pairs (different instances)
-        # We want to maximize distance, so minimize negative distance
-        push_ac = -((instance_a - instance_c) ** 2).sum(dim=1).mean()  # negative to maximize distance
-        push_ad = -((instance_a - instance_d) ** 2).sum(dim=1).mean()
-        push_bc = -((instance_b - instance_c) ** 2).sum(dim=1).mean()
-        push_bd = -((instance_b - instance_d) ** 2).sum(dim=1).mean()
-        push_loss = (push_ac + push_ad + push_bc + push_bd) / 4.0
-        
-        # Total contrastive loss: pull together, push apart
-        contrastive_loss = pull_loss + push_loss
-        aux["contrastive_loss"] = contrastive_loss
->>>>>>> Stashed changes
 
         # original encodings for instance i
         code_aa = torch.cat([code_instance_a, code_pose_a], dim=-1)
@@ -771,40 +738,15 @@ class FlowMo(nn.Module):
             d: [code_dd, code_dc],
         }
 
-<<<<<<< Updated upstream
         # Decode each code
         v_ests = [] 
         posttrain_samples = []
         for i, code in enumerate(codes):
             bs, t, f = code.shape
-=======
-        quantizer_losses = []
-        v_ests = []
-        posttrain_samples = []
-        
-        for image, codes in image_to_codes.items():
-            for code in codes:
-                b, t, f = code.shape
-                code, _, quantizer_loss = self._quantize(code)
-                quantizer_losses.append(quantizer_loss)
 
-                mask = torch.ones_like(code[..., :1])
-                code = torch.concatenate([code, mask], axis=-1)
-                code_pre_cfg = code
->>>>>>> Stashed changes
-
-                if self.config.model.enable_cfg and enable_cfg:
-                    cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None]
-                    code = code * cfg_mask
-
-<<<<<<< Updated upstream
             if self.config.model.enable_cfg and enable_cfg:
                 cfg_mask = (torch.rand((bs,), device=code.device) > 0.1)[:, None, None]
                 code = code * cfg_mask
-=======
-                v_est, decode_aux = self.decode(image, code, timesteps)
-                v_ests.append(v_est)
->>>>>>> Stashed changes
 
                 if self.config.model.posttrain_sample:
                     posttrain_sample = self.reconstruct_checkpoint(code_pre_cfg)
@@ -1000,11 +942,7 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 4, 3, H, W
     else:
         lpips_dist = 0.0
 
-<<<<<<< Updated upstream
     loss = loss + weighted_kl_loss + lpips_dist
-=======
-    loss = loss + aux["quantizer_loss"] + lpips_dist + contrastive_loss_weighted
->>>>>>> Stashed changes
     aux["loss_dict"]["total_loss"] = loss
 
     return loss, aux
