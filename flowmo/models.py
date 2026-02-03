@@ -699,7 +699,7 @@ class FlowMo(nn.Module):
         temp=0.07
     ):
         # code_instance_a[i] = code_instance_b[i]
-        # code_instance_a[i] should be pushed away from code_instance_b[not i]
+        # code_instance_a[i] is pushed away from code_instance_b[not i]
         # and pushed away from code_instance_a[not i]
 
         B = code_instance_a.shape[0]
@@ -751,7 +751,7 @@ class FlowMo(nn.Module):
 
         codes = [code_a_recon, code_a_swap, code_b_recon, code_b_swap]
 
-        # implement infoNCE contrastive loss on entire batch
+        # infonce on the whole batch
         instance_contrastive_loss = self.compute_infonce_loss(code_instance_a, code_instance_b)
         aux["instance_contrastive_loss"] = instance_contrastive_loss
 
