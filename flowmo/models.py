@@ -730,8 +730,8 @@ class FlowMo(nn.Module):
     # takes a batch of pairs and returns a batch of v_ests
     def forward(
         self,
-        batch, # [batch_size, 2, C, H, W]
-        noised_batch, # [batch_size, 2, C, H, W]
+        batch, # [batch_size, 4, C, H, W]
+        noised_batch, # [batch_size, 4, C, H, W]
         timesteps,
         enable_cfg=True,
     ):
@@ -739,7 +739,7 @@ class FlowMo(nn.Module):
         B, _, C, H, W = batch.shape
 
         a = batch[:, 0] # instance i, pose p1
-        b = batch[:, 1] # instance i, pose p2
+        b = batch[:, 2] # instance i, pose p2
 
         code_instance_a, code_pose_a, encode_aux_a = self.encode(a)
         code_instance_b, code_pose_b, encode_aux_b = self.encode(b)
@@ -780,7 +780,7 @@ class FlowMo(nn.Module):
                 posttrain_sample = self.reconstruct_checkpoint(code_pre_cfg)
                 posttrain_samples.append(posttrain_sample)
 
-        v_ests = torch.stack(v_ests, dim=1)
+        v_ests = torch.stack(v_ests, dim=1) # [B, 4, C, H, W] is this true
         aux["quantizer_loss"] = sum(quantizer_losses)
         if self.config.model.posttrain_sample:
             aux["posttrain_samples"] = torch.stack(posttrain_samples, dim=1) # [B, 4, C, H, W]
@@ -899,11 +899,11 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
     x = batch["images"]
 
     x = torch.stack([
-        x[:, 0], # b recon
-        x[:, 0], # b swap
-        x[:, 1], # b recon
-        x[:, 1], # b swap
-    ], dim=1)
+        x[:, 0], # a for recon
+        x[:, 0], # a for swap
+        x[:, 1], # b for recon
+        x[:, 1], # b for swap
+    ], dim=1) # [B, 4, C, H, W]
     
     b = x.size(0)
     
