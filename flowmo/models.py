@@ -692,39 +692,39 @@ class FlowMo(nn.Module):
             raise NotImplementedError
         return code, indices, quantizer_loss
 
-    def compute_infonce_loss(
-        self, 
-        code_instance_a, # instance codes for pose p1 for each instance [batch_size, D, F]
-        code_instance_b, # instance codes for pose p2 for each instance
-        temp=0.07
-    ):
-        # code_instance_a[i] = code_instance_b[i]
-        # code_instance_a[i] is pushed away from code_instance_b[not i]
-        # and pushed away from code_instance_a[not i]
+    # def compute_infonce_loss(
+    #     self, 
+    #     code_instance_a, # instance codes for pose p1 for each instance [batch_size, D, F]
+    #     code_instance_b, # instance codes for pose p2 for each instance
+    #     temp=0.07
+    # ):
+    #     # code_instance_a[i] = code_instance_b[i]
+    #     # code_instance_a[i] is pushed away from code_instance_b[not i]
+    #     # and pushed away from code_instance_a[not i]
 
-        B = code_instance_a.shape[0]
+    #     B = code_instance_a.shape[0]
 
-        code_a = code_instance_a.mean(dim=1) # [B, F]
-        code_b = code_instance_b.mean(dim=1)
+    #     code_a = code_instance_a.mean(dim=1) # [B, F]
+    #     code_b = code_instance_b.mean(dim=1)
 
-        code_a = F.normalize(code_a, dim=-1) # [B, F]
-        code_b = F.normalize(code_b, dim=-1)
+    #     code_a = F.normalize(code_a, dim=-1) # [B, F]
+    #     code_b = F.normalize(code_b, dim=-1)
 
-        codes = torch.cat([code_a, code_b], dim=0)
+    #     codes = torch.cat([code_a, code_b], dim=0)
 
-        similarity_matrix = torch.matmul(codes, codes.T) / temp
+    #     similarity_matrix = torch.matmul(codes, codes.T) / temp
 
-        labels = torch.cat([
-            torch.arange(B, 2*B, device=codes.device), 
-            torch.arange(0, B, device=codes.device),
-        ])
+    #     labels = torch.cat([
+    #         torch.arange(B, 2*B, device=codes.device), 
+    #         torch.arange(0, B, device=codes.device),
+    #     ])
 
-        mask = torch.eye(2*B, device=codes.device, dtype=torch.bool)
-        similarity_matrix = similarity_matrix.masked_fill(mask, float('-inf'))
+    #     mask = torch.eye(2*B, device=codes.device, dtype=torch.bool)
+    #     similarity_matrix = similarity_matrix.masked_fill(mask, float('-inf'))
 
-        loss = F.cross_entropy(similarity_matrix, labels)
+    #     loss = F.cross_entropy(similarity_matrix, labels)
     
-        return loss
+    #     return loss
 
 
     # takes a batch of pairs and returns a batch of v_ests
@@ -752,8 +752,8 @@ class FlowMo(nn.Module):
         codes = [code_a_recon, code_a_swap, code_b_recon, code_b_swap]
 
         # infonce on the whole batch
-        instance_contrastive_loss = self.compute_infonce_loss(code_instance_a, code_instance_b)
-        aux["instance_contrastive_loss"] = instance_contrastive_loss
+        # instance_contrastive_loss = self.compute_infonce_loss(code_instance_a, code_instance_b)
+        # aux["instance_contrastive_loss"] = instance_contrastive_loss
 
         # i might be able to do this better if i batch it properly but for now this is simpler
         v_ests = [] 
@@ -942,7 +942,7 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
     aux["loss_dict"] = {}
     aux["loss_dict"]["diffusion_loss"] = loss
     aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"]
-    aux["loss_dict"]["instance_contrastive_loss"] = aux["instance_contrastive_loss"]
+    # aux["loss_dict"]["instance_contrastive_loss"] = aux["instance_contrastive_loss"]
 
     if config.opt.lpips_weight != 0.0:
         if config.model.posttrain_sample:
@@ -957,7 +957,7 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
     else:
         lpips_dist = 0.0
 
-    loss = loss + aux["quantizer_loss"] + lpips_dist + aux["instance_contrastive_loss"]
+    loss = loss + aux["quantizer_loss"] + lpips_dist  # + aux["instance_contrastive_loss"]
     aux["loss_dict"]["total_loss"] = loss
 
     return loss, aux
