@@ -739,7 +739,7 @@ class FlowMo(nn.Module):
         B, _, C, H, W = batch.shape
 
         a = batch[:, 0] # instance i, pose p1
-        b = batch[:, 1] # instance i, pose p2
+        b = batch[:, 2] # instance i, pose p2
 
         code_instance_a, code_pose_a, encode_aux_a = self.encode(a)
         code_instance_b, code_pose_b, encode_aux_b = self.encode(b)
