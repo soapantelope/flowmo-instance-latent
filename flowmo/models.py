@@ -800,7 +800,8 @@ class FlowMo(nn.Module):
         aux["pose_quantizer_loss"] = pose_loss_a + pose_loss_b
 
         # infonce on the whole batch (use quantized instance codes)
-        instance_contrastive_loss = self.compute_infonce_loss(code_instance_a, code_instance_b)
+        # instance_contrastive_loss = self.compute_infonce_loss(code_instance_a, code_instance_b)
+        instance_contrastive_loss = 0.0
         aux["instance_contrastive_loss"] = instance_contrastive_loss
 
         # i might be able to do this better if i batch it properly but for now this is simpler
