@@ -22,7 +22,9 @@ model:
   fix_initial_norms: True
   fix_norm_mode: l2
 
-  quantization_type: lfq
+  quantization_type: lfq # not using this anymore
+  pose_quantization_type: kl
+  instance_quantization_type: lfq
   code_length: 256
   context_dim: 18
   codebook_size_for_entropy: 9
@@ -50,6 +52,7 @@ opt:
   log_norms: True
   lpips_weight: 0.1
   lpips_mode: "vgg"
+  pose_kl_weight: 0.01 # only used when pose_quantization_type is kl
 
   beta1: .9
   beta2: .95
@@ -70,10 +73,10 @@ eval:
   continuous: True
   force_ckpt_path: null
   subsample_rate: 1
-  
+
   sampling:
     sample_steps: 25
     schedule: "pow_0.25"
     cfg: 1.5
-    mode: 'rf'
+    mode: "rf"
     cfg_interval: "(.17,1.02)"
