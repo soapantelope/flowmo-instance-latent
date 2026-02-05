@@ -154,6 +154,50 @@ def create_visualization(image_a, image_b, generations, instance_id, pose_a_id, 
     print(f"Saved: {save_path}")
 
 
+def create_interpolation_visualization(image_a, image_b, interpolated_images, instance_id, pose_a_id, pose_b_id, save_path):
+    num_steps = len(interpolated_images)
+    
+    fig, axes = plt.subplots(2, num_steps + 2, figsize=(3 * (num_steps + 2), 6))
+    
+    axes[0, 0].imshow(tensor_to_display(image_a).transpose(1, 2, 0))
+    axes[0, 0].set_title(f"Original A\n(Pose Source)", fontsize=10, fontweight='bold')
+    axes[0, 0].axis('off')
+    
+    for i in range(1, num_steps + 1):
+        axes[0, i].axis('off')
+    
+    axes[0, num_steps + 1].imshow(tensor_to_display(image_b).transpose(1, 2, 0))
+    axes[0, num_steps + 1].set_title(f"Original B\n(Pose Target)", fontsize=10, fontweight='bold')
+    axes[0, num_steps + 1].axis('off')
+    
+    axes[1, 0].imshow(tensor_to_display(image_a).transpose(1, 2, 0))
+    axes[1, 0].set_title(f"Original A", fontsize=10, color='green')
+    axes[1, 0].axis('off')
+    
+    for i, img in enumerate(interpolated_images):
+        alpha = i / (num_steps - 1) if num_steps > 1 else 0
+        axes[1, i + 1].imshow(tensor_to_display(img[0]).transpose(1, 2, 0))
+        axes[1, i + 1].set_title(f"α = {alpha:.2f}", fontsize=10)
+        axes[1, i + 1].axis('off')
+    
+    axes[1, num_steps + 1].imshow(tensor_to_display(image_b).transpose(1, 2, 0))
+    axes[1, num_steps + 1].set_title(f"Original B", fontsize=10, color='green')
+    axes[1, num_steps + 1].axis('off')
+    
+    plt.suptitle(f"Pose Interpolation: {instance_id} | Poses: {pose_a_id} → {pose_b_id}\n"
+                 f"Instance from A, Pose interpolated from A to B", 
+                 fontsize=14, y=0.98)
+    
+    fig.text(0.5, 0.02, 
+             "Bottom row: Generated images with fixed instance (from A) and linearly interpolated pose latent",
+             ha='center', fontsize=10, style='italic')
+    
+    plt.tight_layout(rect=[0, 0.05, 1, 0.93])
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {save_path}")
+
+
 def create_detailed_visualization(image_a, image_b, generations, instance_id, pose_a_id, pose_b_id, save_path):
     """Create a more detailed visualization with separate sections."""
     fig = plt.figure(figsize=(18, 12))
@@ -250,6 +294,10 @@ def main():
     parser.add_argument("--config", type=str, 
                         default="results/flowmo_instance_pretrain/config.yaml",
                         help="Path to config file (use training config for matching architecture)")
+    parser.add_argument("--interpolate", action="store_true",
+                        help="Run pose interpolation between the two poses")
+    parser.add_argument("--interpolate-steps", type=int, default=5,
+                        help="Number of interpolation steps (including endpoints)")
     args = parser.parse_args()
     
     os.makedirs(args.output_dir, exist_ok=True)
@@ -354,9 +402,33 @@ def main():
         Image.fromarray(img_np).save(save_path)
         print(f"Saved: {save_path}")
     
+    if args.interpolate:
+        print(f"\nRunning pose interpolation ({args.interpolate_steps} steps)...")
+        with torch.no_grad():
+            interpolated_images = model.generate_pose_interpolation(
+                instance_image=image_a_batch,
+                pose_image_a=image_a_batch,
+                pose_image_b=image_b_batch,
+                num_steps=args.interpolate_steps,
+            )
+        
+        create_interpolation_visualization(
+            image_a, image_b, interpolated_images,
+            args.instance, args.pose_a, args.pose_b,
+            os.path.join(args.output_dir, "pose_interpolation.png")
+        )
+        
+        for i, img in enumerate(interpolated_images):
+            alpha = i / (args.interpolate_steps - 1) if args.interpolate_steps > 1 else 0
+            save_path = os.path.join(args.output_dir, f"interp_{i:02d}_alpha_{alpha:.2f}.png")
+            img_np = (tensor_to_display(img[0]).transpose(1, 2, 0) * 255).astype(np.uint8)
+            Image.fromarray(img_np).save(save_path)
+            print(f"Saved: {save_path}")
+    
     print(f"\n✓ All outputs saved to: {args.output_dir}")
     print("\nUsage example:")
-    print(f"  python inference.py --checkpoint path/to/ckpt.pth --instance 0 --pose-a 0 --pose-b 199")
+    print(f"  python infer.py --checkpoint path/to/ckpt.pth --instance 0 --pose-a 0 --pose-b 199")
+    print(f"  python infer.py --checkpoint path/to/ckpt.pth --instance 0 --pose-a 0 --pose-b 199 --interpolate --interpolate-steps 7")
     print("\nKey test: Do 'b_inst_a_pose' and 'a_inst_b_pose' match originals A and B?")
     print("If yes → instance codes are properly disentangled from pose!")
 
