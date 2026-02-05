@@ -859,45 +859,6 @@ class FlowMo(nn.Module):
         return z
 
     @torch.no_grad()
-    def generate_pose_interpolation(self, instance_image, pose_image_a, pose_image_b, num_steps=5, dtype=torch.bfloat16):
-        config = self.config.eval.sampling
-        
-        with torch.autocast("cuda", dtype=dtype):
-            _, c, h, w = instance_image.shape
-            
-            instance_code = self.encode_instance(instance_image.cuda())
-            pose_code_a = self.encode_pose(pose_image_a.cuda())
-            pose_code_b = self.encode_pose(pose_image_b.cuda())
-            
-            interpolated_images = []
-            alphas = torch.linspace(0, 1, num_steps, device=pose_code_a.device)
-            
-            for alpha in alphas:
-                pose_code = (1 - alpha) * pose_code_a + alpha * pose_code_b
-                code = torch.cat([instance_code, pose_code], dim=-1)
-                
-                z = torch.randn((1, 3, h, w)).cuda()
-                mask = torch.ones_like(code[..., :1])
-                code = torch.concatenate([code * mask, mask], axis=-1)
-                
-                cfg_mask = 0.0
-                null_code = code * cfg_mask if config.cfg != 1.0 else None
-                
-                sample = rf_sample(
-                    self,
-                    z,
-                    code,
-                    null_code=null_code,
-                    sample_steps=config.sample_steps,
-                    cfg=config.cfg,
-                    schedule=config.schedule,
-                )[-1].clip(-1, 1)
-                
-                interpolated_images.append(sample.to(torch.float32))
-                    
-        return interpolated_images
-
-    @torch.no_grad()
     def generate_from_pose_instance(self, pose_images, instance_images, dtype=torch.bfloat16):
         model = self
         config = self.config.eval.sampling
