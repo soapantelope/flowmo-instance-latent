@@ -801,8 +801,7 @@ class FlowMo(nn.Module):
 
         # infonce on the whole batch (use quantized instance codes)
         # instance_contrastive_loss = self.compute_infonce_loss(code_instance_a, code_instance_b)
-        instance_contrastive_loss = 0.0
-        aux["instance_contrastive_loss"] = instance_contrastive_loss
+        # aux["instance_contrastive_loss"] = instance_contrastive_loss
 
         # i might be able to do this better if i batch it properly but for now this is simpler
         v_ests = [] 
@@ -988,7 +987,7 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
     aux["loss_dict"]["instance_quantizer_loss"] = aux["instance_quantizer_loss"]
     aux["loss_dict"]["pose_quantizer_loss"] = aux["pose_quantizer_loss"]
     aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"] 
-    aux["loss_dict"]["instance_contrastive_loss"] = aux["instance_contrastive_loss"]
+    # aux["loss_dict"]["instance_contrastive_loss"] = aux["instance_contrastive_loss"]
 
     if config.opt.lpips_weight != 0.0:
         if config.model.posttrain_sample:
@@ -1006,7 +1005,7 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
     pose_kl_weight = getattr(config.opt, 'pose_kl_weight', 1.0)
     
     weighted_pose_loss = pose_kl_weight * aux["pose_quantizer_loss"]
-    loss = loss + aux["instance_quantizer_loss"] + weighted_pose_loss + lpips_dist + aux["instance_contrastive_loss"]
+    loss = loss + aux["instance_quantizer_loss"] + weighted_pose_loss + lpips_dist # + aux["instance_contrastive_loss"]
     aux["loss_dict"]["total_loss"] = loss
 
     return loss, aux
