@@ -773,7 +773,7 @@ class FlowMo(nn.Module):
                 cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None]
                 code = code * cfg_mask
 
-            v_est, decode_aux = self.decode(noised_batch[:, i // 2], code, timesteps)
+            v_est, decode_aux = self.decode(noised_batch[:, i], code, timesteps)
             v_ests.append(v_est)
 
             if self.config.model.posttrain_sample:
