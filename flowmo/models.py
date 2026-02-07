@@ -82,7 +82,7 @@ def _sample_diagonal_gaussian(mean, logvar):
 
 def _kl_diagonal_gaussian(mean, logvar):
     var = torch.exp(logvar)
-    return 0.5 * torch.sum(torch.pow(mean, 2) + var - 1.0 - logvar, dim=1).mean()
+    return 0.5 * torch.mean(torch.pow(mean, 2) + var - 1.0 - logvar)
 
 
 class EmbedND(nn.Module):
@@ -1042,8 +1042,17 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
         lpips_dist = 0.0
 
     pose_kl_weight = getattr(config.opt, 'pose_kl_weight', 1.0)
+    pose_kl_anneal_steps = getattr(config.opt, 'pose_kl_anneal_steps', 0)
     
-    weighted_pose_loss = pose_kl_weight * aux["pose_quantizer_loss"]
+    total_steps = aux_state.get("total_steps", 0)
+    if pose_kl_anneal_steps > 0:
+        anneal_factor = min(1.0, total_steps / pose_kl_anneal_steps)
+    else:
+        anneal_factor = 1.0
+    
+    effective_kl_weight = pose_kl_weight * anneal_factor
+    weighted_pose_loss = effective_kl_weight * aux["pose_quantizer_loss"]
+    aux["loss_dict"]["effective_kl_weight"] = effective_kl_weight
     loss = loss + aux["instance_quantizer_loss"] + weighted_pose_loss + lpips_dist + aux["instance_contrastive_loss"]
     aux["loss_dict"]["total_loss"] = loss
 
