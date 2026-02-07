@@ -745,11 +745,13 @@ class FlowMo(nn.Module):
         code_instance_b, code_pose_b, encode_aux_b = self.encode(b)
 
         code_a_recon = torch.cat([code_instance_a, code_pose_a], dim=-1)
-        code_a_swap = torch.cat([code_instance_b, code_pose_a], dim=-1)
+        code_a_recon_2 = torch.cat([code_instance_a, code_pose_a], dim=-1)
+        # code_a_swap = torch.cat([code_instance_b, code_pose_a], dim=-1)
         code_b_recon = torch.cat([code_instance_b, code_pose_b], dim=-1)
-        code_b_swap = torch.cat([code_instance_a, code_pose_b], dim=-1)
+        code_b_recon_2 = torch.cat([code_instance_b, code_pose_b], dim=-1)
+        # code_b_swap = torch.cat([code_instance_a, code_pose_b], dim=-1)
 
-        codes = [code_a_recon, code_a_swap, code_b_recon, code_b_swap]
+        codes = [code_a_recon, code_a_recon_2, code_b_recon, code_b_recon_2]
 
         # infonce on the whole batch
         # instance_contrastive_loss = self.compute_infonce_loss(code_instance_a, code_instance_b)
