@@ -536,11 +536,22 @@ class FlowMo(nn.Module):
         self.code_length = code_length
         self.dit_mode = "dit_b_4"
         self.context_dim = context_dim
-        self.encoder_context_dim = context_dim * (
-            1 + (self.config.model.quantization_type == "kl")
+
+        # Separate quantization types for pose and instance
+        self.pose_quantization_type = config.model.pose_quantization_type
+        self.instance_quantization_type = config.model.instance_quantization_type
+
+        # Separate context dims based on quantization type
+        # KL needs 2x output (mean + logvar), which gets halved after sampling
+        self.pose_encoder_context_dim = context_dim * (
+            1 + (self.pose_quantization_type == "kl")
+        )
+        self.instance_encoder_context_dim = context_dim * (
+            1 + (self.instance_quantization_type == "kl")
         )
 
-        if config.model.quantization_type == "lfq":
+        # Create quantizer if either encoder uses LFQ
+        if self.pose_quantization_type == "lfq" or self.instance_quantization_type == "lfq":
             self.quantizer = lookup_free_quantize.LFQ(
                 codebook_size=2**self.config.model.codebook_size_for_entropy,
                 dim=self.config.model.codebook_size_for_entropy,
@@ -553,31 +564,43 @@ class FlowMo(nn.Module):
         else:
             enc_width = width
 
-        encoder_params = FluxParams(
+        # Separate encoder params for pose and instance
+        pose_encoder_params = FluxParams(
             in_channels=3 * patch_size**2,
-            context_dim=self.encoder_context_dim,
+            context_dim=self.pose_encoder_context_dim,
+            patch_size=patch_size,
+            depth=enc_depth,
+            **DIT_ZOO[self.dit_mode],
+        )
+        instance_encoder_params = FluxParams(
+            in_channels=3 * patch_size**2,
+            context_dim=self.instance_encoder_context_dim,
             patch_size=patch_size,
             depth=enc_depth,
             **DIT_ZOO[self.dit_mode],
         )
         decoder_params = FluxParams(
             in_channels=3 * patch_size**2,
-            context_dim=context_dim * 2 + 1,  # instance + pose + mask
+            context_dim=context_dim * 2 + 1,  # instance + pose + mask (both are context_dim after quantization)
             patch_size=patch_size,
             depth=dec_depth,
             **DIT_ZOO[self.dit_mode],
         )
 
         # width=4, dit_b_4 is the usual model
-        encoder_params.hidden_size = enc_width * (encoder_params.hidden_size // 4)
+        pose_encoder_params.hidden_size = enc_width * (pose_encoder_params.hidden_size // 4)
+        instance_encoder_params.hidden_size = enc_width * (instance_encoder_params.hidden_size // 4)
         decoder_params.hidden_size = width * (decoder_params.hidden_size // 4)
-        encoder_params.axes_dim = [
-            (d // 4) * enc_width for d in encoder_params.axes_dim
+        pose_encoder_params.axes_dim = [
+            (d // 4) * enc_width for d in pose_encoder_params.axes_dim
+        ]
+        instance_encoder_params.axes_dim = [
+            (d // 4) * enc_width for d in instance_encoder_params.axes_dim
         ]
         decoder_params.axes_dim = [(d // 4) * width for d in decoder_params.axes_dim]
 
-        self.pose_encoder = Flux(encoder_params, name="pose_encoder")
-        self.instance_encoder = Flux(encoder_params, name="instance_encoder")
+        self.pose_encoder = Flux(pose_encoder_params, name="pose_encoder")
+        self.instance_encoder = Flux(instance_encoder_params, name="instance_encoder")
         self.decoder = Flux(decoder_params, name="decoder")
 
     @torch.compile
@@ -587,30 +610,37 @@ class FlowMo(nn.Module):
 
         img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
         
-        txt = torch.zeros(
-            (b, self.code_length, self.encoder_context_dim), device=img.device
+        # Pose encoder with its context dim
+        txt_pose = torch.zeros(
+            (b, self.code_length, self.pose_encoder_context_dim), device=img.device
         )
+        _, code_pose, aux_pose = self.pose_encoder(img, img_idxs, txt_pose, txt_idxs, timesteps=None)
 
-        _, code_pose, aux_pose = self.pose_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
-        _, code_instance, aux_instance = self.instance_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+        # Instance encoder with its context dim
+        txt_instance = torch.zeros(
+            (b, self.code_length, self.instance_encoder_context_dim), device=img.device
+        )
+        _, code_instance, aux_instance = self.instance_encoder(img, img_idxs, txt_instance, txt_idxs, timesteps=None)
 
         aux = {"aux_pose": aux_pose, "aux_instance": aux_instance}
         return code_instance, code_pose, aux
     
     @torch.no_grad()
-    def encode_pose(self, img): # just going to use this for inference
+    def encode_pose(self, img): # for inference
         b, c, h, w = img.shape
         img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
-        txt = torch.zeros((b, self.code_length, self.encoder_context_dim), device=img.device)
+        txt = torch.zeros((b, self.code_length, self.pose_encoder_context_dim), device=img.device)
         _, code_pose, _ = self.pose_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+        code_pose, _, _ = self._quantize(code_pose, self.pose_quantization_type, deterministic=True)
         return code_pose
     
     @torch.no_grad()
-    def encode_instance(self, img): # just going to use this for inference
+    def encode_instance(self, img): # for inference
         b, c, h, w = img.shape
         img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
-        txt = torch.zeros((b, self.code_length, self.encoder_context_dim), device=img.device)
+        txt = torch.zeros((b, self.code_length, self.instance_encoder_context_dim), device=img.device)
         _, code_instance, _ = self.instance_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+        code_instance, _, _ = self._quantize(code_instance, self.instance_quantization_type, deterministic=True)
         return code_instance
 
     def _decode(self, img, code, timesteps):
@@ -643,33 +673,43 @@ class FlowMo(nn.Module):
         )
 
     @torch.compile
-    def _quantize(self, code):
+    def _quantize(self, code, quantization_type, deterministic=False):
         """
         Args:
-            code: [b codelength context dim]
+            code: [b, codelength, context_dim] or [b, codelength, 2*context_dim] for kl
+            quantization_type: "noop", "kl", or "lfq"
+            deterministic: if True and using "kl", use mean instead of sampling (for inference)
 
         Returns:
-            quantized code of the same shape
+            quantized code: [b, codelength, context_dim] (halved for kl)
+            indices: token indices (only for lfq)
+            quantizer_loss: scalar loss
         """
         b, t, f = code.shape
         indices = None
-        if self.config.model.quantization_type == "noop":
+        if quantization_type == "noop":
             quantized = code
             quantizer_loss = torch.tensor(0.0).to(code.device)
-        elif self.config.model.quantization_type == "kl":
+        elif quantization_type == "kl":
             # colocating features of same token before split is maybe slightly
             # better?
             mean, logvar = _get_diagonal_gaussian(
                 einops.rearrange(code, "b t f -> b (f t)")
             )
-            code = einops.rearrange(
-                _sample_diagonal_gaussian(mean, logvar),
+            if deterministic:
+                # Use mean directly for inference (no sampling)
+                sampled = mean
+            else:
+                # Sample for training (reparameterization trick)
+                sampled = _sample_diagonal_gaussian(mean, logvar)
+            quantized = einops.rearrange(
+                sampled,
                 "b (f t) -> b t f",
                 f=f // 2,
                 t=t,
             )
             quantizer_loss = _kl_diagonal_gaussian(mean, logvar)
-        elif self.config.model.quantization_type == "lfq":
+        elif quantization_type == "lfq":
             assert f % self.config.model.codebook_size_for_entropy == 0, f
             code = einops.rearrange(
                 code,
@@ -687,51 +727,50 @@ class FlowMo(nn.Module):
                 entropy_aux_loss * self.config.model.entropy_loss_weight
                 + breakdown.commitment * self.config.model.commit_loss_weight
             )
-            code = quantized
         else:
-            raise NotImplementedError
-        return code, indices, quantizer_loss
+            raise NotImplementedError(f"Unknown quantization type: {quantization_type}")
+        return quantized, indices, quantizer_loss
 
-    # def compute_infonce_loss(
-    #     self, 
-    #     code_instance_a, # instance codes for pose p1 for each instance [batch_size, D, F]
-    #     code_instance_b, # instance codes for pose p2 for each instance
-    #     temp=0.07
-    # ):
-    #     # code_instance_a[i] = code_instance_b[i]
-    #     # code_instance_a[i] is pushed away from code_instance_b[not i]
-    #     # and pushed away from code_instance_a[not i]
+    def compute_infonce_loss(
+        self, 
+        code_instance_a, # instance codes for pose p1 for each instance [batch_size, D, F]
+        code_instance_b, # instance codes for pose p2 for each instance
+        temp=0.07
+    ):
+        # code_instance_a[i] = code_instance_b[i]
+        # code_instance_a[i] is pushed away from code_instance_b[not i]
+        # and pushed away from code_instance_a[not i]
 
-    #     B = code_instance_a.shape[0]
+        B = code_instance_a.shape[0]
 
-    #     code_a = code_instance_a.mean(dim=1) # [B, F]
-    #     code_b = code_instance_b.mean(dim=1)
+        code_a = code_instance_a.mean(dim=1) # [B, F]
+        code_b = code_instance_b.mean(dim=1)
 
-    #     code_a = F.normalize(code_a, dim=-1) # [B, F]
-    #     code_b = F.normalize(code_b, dim=-1)
+        code_a = F.normalize(code_a, dim=-1) # [B, F]
+        code_b = F.normalize(code_b, dim=-1)
 
-    #     codes = torch.cat([code_a, code_b], dim=0)
+        codes = torch.cat([code_a, code_b], dim=0)
 
-    #     similarity_matrix = torch.matmul(codes, codes.T) / temp
+        similarity_matrix = torch.matmul(codes, codes.T) / temp
 
-    #     labels = torch.cat([
-    #         torch.arange(B, 2*B, device=codes.device), 
-    #         torch.arange(0, B, device=codes.device),
-    #     ])
+        labels = torch.cat([
+            torch.arange(B, 2*B, device=codes.device), 
+            torch.arange(0, B, device=codes.device),
+        ])
 
-    #     mask = torch.eye(2*B, device=codes.device, dtype=torch.bool)
-    #     similarity_matrix = similarity_matrix.masked_fill(mask, float('-inf'))
+        mask = torch.eye(2*B, device=codes.device, dtype=torch.bool)
+        similarity_matrix = similarity_matrix.masked_fill(mask, float('-inf'))
 
-    #     loss = F.cross_entropy(similarity_matrix, labels)
+        loss = F.cross_entropy(similarity_matrix, labels)
     
-    #     return loss
+        return loss
 
 
     # takes a batch of pairs and returns a batch of v_ests
     def forward(
         self,
-        batch, # [batch_size, 2, C, H, W]
-        noised_batch, # [batch_size, 2, C, H, W]
+        batch, # [batch_size, 4, C, H, W]
+        noised_batch, # [batch_size, 4, C, H, W]
         timesteps,
         enable_cfg=True,
     ):
@@ -744,6 +783,12 @@ class FlowMo(nn.Module):
         code_instance_a, code_pose_a, encode_aux_a = self.encode(a)
         code_instance_b, code_pose_b, encode_aux_b = self.encode(b)
 
+        # quantize separately bc different quantization types
+        code_instance_a, _, inst_loss_a = self._quantize(code_instance_a, self.instance_quantization_type)
+        code_instance_b, _, inst_loss_b = self._quantize(code_instance_b, self.instance_quantization_type)
+        code_pose_a, _, pose_loss_a = self._quantize(code_pose_a, self.pose_quantization_type)
+        code_pose_b, _, pose_loss_b = self._quantize(code_pose_b, self.pose_quantization_type)
+
         code_a_recon = torch.cat([code_instance_a, code_pose_a], dim=-1)
         code_a_swap = torch.cat([code_instance_b, code_pose_a], dim=-1)
         code_b_recon = torch.cat([code_instance_b, code_pose_b], dim=-1)
@@ -751,19 +796,18 @@ class FlowMo(nn.Module):
 
         codes = [code_a_recon, code_a_swap, code_b_recon, code_b_swap]
 
-        # infonce on the whole batch
+        aux["instance_quantizer_loss"] = inst_loss_a + inst_loss_b
+        aux["pose_quantizer_loss"] = pose_loss_a + pose_loss_b
+
+        # infonce on the whole batch (use quantized instance codes)
         # instance_contrastive_loss = self.compute_infonce_loss(code_instance_a, code_instance_b)
         # aux["instance_contrastive_loss"] = instance_contrastive_loss
 
         # i might be able to do this better if i batch it properly but for now this is simpler
         v_ests = [] 
-        quantizer_losses = []
         posttrain_samples = []
         for i, code in enumerate(codes):
             b, t, f = code.shape
-
-            code, _, quantizer_loss = self._quantize(code)
-            quantizer_losses.append(quantizer_loss)
 
             mask = torch.ones_like(code[..., :1])
             code = torch.concatenate([code, mask], axis=-1)
@@ -780,8 +824,8 @@ class FlowMo(nn.Module):
                 posttrain_sample = self.reconstruct_checkpoint(code_pre_cfg)
                 posttrain_samples.append(posttrain_sample)
 
-        v_ests = torch.stack(v_ests, dim=1)
-        aux["quantizer_loss"] = sum(quantizer_losses)
+        v_ests = torch.stack(v_ests, dim=1) # [B, 4, C, H, W]
+        aux["quantizer_loss"] = aux["instance_quantizer_loss"] + aux["pose_quantizer_loss"]
         if self.config.model.posttrain_sample:
             aux["posttrain_samples"] = torch.stack(posttrain_samples, dim=1) # [B, 4, C, H, W]
 
@@ -815,6 +859,45 @@ class FlowMo(nn.Module):
         return z
 
     @torch.no_grad()
+    def generate_pose_interpolation(self, instance_image, pose_image_a, pose_image_b, num_steps=5, dtype=torch.bfloat16):
+        config = self.config.eval.sampling
+        
+        with torch.autocast("cuda", dtype=dtype):
+            _, c, h, w = instance_image.shape
+            
+            instance_code = self.encode_instance(instance_image.cuda())
+            pose_code_a = self.encode_pose(pose_image_a.cuda())
+            pose_code_b = self.encode_pose(pose_image_b.cuda())
+            
+            interpolated_images = []
+            alphas = torch.linspace(0, 1, num_steps, device=pose_code_a.device)
+            
+            for alpha in alphas:
+                pose_code = (1 - alpha) * pose_code_a + alpha * pose_code_b
+                code = torch.cat([instance_code, pose_code], dim=-1)
+                
+                z = torch.randn((1, 3, h, w)).cuda()
+                mask = torch.ones_like(code[..., :1])
+                code = torch.concatenate([code * mask, mask], axis=-1)
+                
+                cfg_mask = 0.0
+                null_code = code * cfg_mask if config.cfg != 1.0 else None
+                
+                sample = rf_sample(
+                    self,
+                    z,
+                    code,
+                    null_code=null_code,
+                    sample_steps=config.sample_steps,
+                    cfg=config.cfg,
+                    schedule=config.schedule,
+                )[-1].clip(-1, 1)
+                
+                interpolated_images.append(sample.to(torch.float32))
+                    
+        return interpolated_images
+
+    @torch.no_grad()
     def generate_from_pose_instance(self, pose_images, instance_images, dtype=torch.bfloat16):
         model = self
         config = self.config.eval.sampling
@@ -829,7 +912,6 @@ class FlowMo(nn.Module):
             instance_code = self.encode_instance(instance_images.cuda())
 
             code = torch.cat([instance_code, pose_code], dim=-1)
-            code, _, _ = self._quantize(code)
 
             z = torch.randn((bs, 3, h, w)).cuda()
 
@@ -899,11 +981,11 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
     x = batch["images"]
 
     x = torch.stack([
-        x[:, 0], # b recon
-        x[:, 0], # b swap
-        x[:, 1], # b recon
-        x[:, 1], # b swap
-    ], dim=1)
+        x[:, 0], # a for recon
+        x[:, 0], # a for swap
+        x[:, 1], # b for recon
+        x[:, 1], # b for swap
+    ], dim=1) # [B, 4, C, H, W]
     
     b = x.size(0)
     
@@ -927,8 +1009,6 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
     zt = (1 - t_expanded) * x + t_expanded * z1
 
     zt, t = zt.to(x.dtype), t.to(x.dtype)
-    assert(zt.shape == x.shape)
-    assert(zt.shape[1] == 4)
 
     vthetas, aux = model(
         batch=x,
@@ -943,7 +1023,9 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
 
     aux["loss_dict"] = {}
     aux["loss_dict"]["diffusion_loss"] = loss
-    aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"]
+    aux["loss_dict"]["instance_quantizer_loss"] = aux["instance_quantizer_loss"]
+    aux["loss_dict"]["pose_quantizer_loss"] = aux["pose_quantizer_loss"]
+    aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"] 
     # aux["loss_dict"]["instance_contrastive_loss"] = aux["instance_contrastive_loss"]
 
     if config.opt.lpips_weight != 0.0:
@@ -959,7 +1041,10 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
     else:
         lpips_dist = 0.0
 
-    loss = loss + aux["quantizer_loss"] + lpips_dist  # + aux["instance_contrastive_loss"]
+    pose_kl_weight = getattr(config.opt, 'pose_kl_weight', 1.0)
+    
+    weighted_pose_loss = pose_kl_weight * aux["pose_quantizer_loss"]
+    loss = loss + aux["instance_quantizer_loss"] + weighted_pose_loss + lpips_dist # + aux["instance_contrastive_loss"]
     aux["loss_dict"]["total_loss"] = loss
 
     return loss, aux
