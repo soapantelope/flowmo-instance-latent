@@ -52,8 +52,8 @@ opt:
   log_norms: True
   lpips_weight: 0.1
   lpips_mode: "vgg"
-  pose_kl_weight: 0.5 # only used when pose_quantization_type is kl (per-dimension, since KL uses mean not sum)
-  pose_kl_anneal_steps: 10000 # linearly ramp KL weight from 0 to pose_kl_weight over this many steps (0 = no annealing)
+  pose_kl_weight: 0.01 # only used when pose_quantization_type is kl (per-dimension, since KL uses mean not sum)
+  pose_kl_anneal_steps: 100000 # linearly ramp KL weight from 0 to pose_kl_weight over this many steps (0 = no annealing)
 
   beta1: .9
   beta2: .95
