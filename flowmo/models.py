@@ -525,6 +525,8 @@ class FlowMo(nn.Module):
         super().__init__()
         code_length = config.model.code_length
         context_dim = config.model.context_dim
+        pose_context_dim = getattr(config.model, 'pose_context_dim', context_dim)
+        instance_context_dim = getattr(config.model, 'instance_context_dim', context_dim)
         enc_depth = config.model.enc_depth
         dec_depth = config.model.dec_depth
 
@@ -535,7 +537,8 @@ class FlowMo(nn.Module):
         self.patch_size = config.model.patch_size
         self.code_length = code_length
         self.dit_mode = "dit_b_4"
-        self.context_dim = context_dim
+        self.pose_context_dim = pose_context_dim
+        self.instance_context_dim = instance_context_dim
 
         # Separate quantization types for pose and instance
         self.pose_quantization_type = config.model.pose_quantization_type
@@ -543,10 +546,10 @@ class FlowMo(nn.Module):
 
         # Separate context dims based on quantization type
         # KL needs 2x output (mean + logvar), which gets halved after sampling
-        self.pose_encoder_context_dim = context_dim * (
+        self.pose_encoder_context_dim = pose_context_dim * (
             1 + (self.pose_quantization_type == "kl")
         )
-        self.instance_encoder_context_dim = context_dim * (
+        self.instance_encoder_context_dim = instance_context_dim * (
             1 + (self.instance_quantization_type == "kl")
         )
 
@@ -581,7 +584,7 @@ class FlowMo(nn.Module):
         )
         decoder_params = FluxParams(
             in_channels=3 * patch_size**2,
-            context_dim=context_dim * 2 + 1,  # instance + pose + mask (both are context_dim after quantization)
+            context_dim=instance_context_dim + pose_context_dim + 1,  # instance + pose + mask
             patch_size=patch_size,
             depth=dec_depth,
             **DIT_ZOO[self.dit_mode],
