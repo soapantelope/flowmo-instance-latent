@@ -37,6 +37,8 @@ model:
   dec_depth: 16
   enable_cfg: True
 
+  infonce_temp: 0.3
+
   ema_decay: 0.9999
 
   posttrain_sample: False

@@ -738,7 +738,6 @@ class FlowMo(nn.Module):
         self, 
         code_instance_a, # instance codes for pose p1 for each instance [batch_size, D, F]
         code_instance_b, # instance codes for pose p2 for each instance
-        temp=0.07
     ):
         # code_instance_a[i] = code_instance_b[i]
         # code_instance_a[i] is pushed away from code_instance_b[not i]
@@ -754,7 +753,7 @@ class FlowMo(nn.Module):
 
         codes = torch.cat([code_a, code_b], dim=0)
 
-        similarity_matrix = torch.matmul(codes, codes.T) / temp
+        similarity_matrix = torch.matmul(codes, codes.T) / self.config.model.infonce_temp
 
         labels = torch.cat([
             torch.arange(B, 2*B, device=codes.device), 
