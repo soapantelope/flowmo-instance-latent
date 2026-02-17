@@ -523,10 +523,11 @@ def get_weights_to_fix(model):
 class FlowMo(nn.Module):
     def __init__(self, width, config):
         super().__init__()
-        code_length = config.model.code_length
-        context_dim = config.model.context_dim
-        pose_context_dim = getattr(config.model, 'pose_context_dim', context_dim)
-        instance_context_dim = getattr(config.model, 'instance_context_dim', context_dim)
+        pose_code_length = config.model.pose_code_length
+        instance_code_length = config.model.instance_code_length
+        pose_context_dim = config.model.pose_context_dim
+        instance_context_dim = config.model.instance_context_dim
+        decoder_context_dim = config.model.decoder_context_dim
         enc_depth = config.model.enc_depth
         dec_depth = config.model.dec_depth
 
@@ -535,7 +536,9 @@ class FlowMo(nn.Module):
 
         self.image_size = config.data.image_size
         self.patch_size = config.model.patch_size
-        self.code_length = code_length
+        self.pose_code_length = pose_code_length
+        self.instance_code_length = instance_code_length
+        self.decoder_context_dim = decoder_context_dim
         self.dit_mode = "dit_b_4"
         self.pose_context_dim = pose_context_dim
         self.instance_context_dim = instance_context_dim
@@ -584,7 +587,7 @@ class FlowMo(nn.Module):
         )
         decoder_params = FluxParams(
             in_channels=3 * patch_size**2,
-            context_dim=instance_context_dim + pose_context_dim + 1,  # instance + pose + mask
+            context_dim=decoder_context_dim + 1,  # projected code + mask
             patch_size=patch_size,
             depth=dec_depth,
             **DIT_ZOO[self.dit_mode],
@@ -606,24 +609,28 @@ class FlowMo(nn.Module):
         self.instance_encoder = Flux(instance_encoder_params, name="instance_encoder")
         self.decoder = Flux(decoder_params, name="decoder")
 
+        # Project pose/instance codes to shared decoder dim before token-dim concatenation
+        self.pose_to_decoder = nn.Linear(pose_context_dim, decoder_context_dim)
+        self.instance_to_decoder = nn.Linear(instance_context_dim, decoder_context_dim)
+
     @torch.compile
     # encodes pose and instance from an image
     def encode(self, img):
         b, c, h, w = img.shape
 
-        img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
-        
         # Pose encoder with its context dim
+        pose_img_idxs, pose_txt_idxs = prepare_idxs(img, self.pose_code_length, self.patch_size)
         txt_pose = torch.zeros(
-            (b, self.code_length, self.pose_encoder_context_dim), device=img.device
+            (b, self.pose_code_length, self.pose_encoder_context_dim), device=img.device
         )
-        _, code_pose, aux_pose = self.pose_encoder(img, img_idxs, txt_pose, txt_idxs, timesteps=None)
+        _, code_pose, aux_pose = self.pose_encoder(img, pose_img_idxs, txt_pose, pose_txt_idxs, timesteps=None)
 
         # Instance encoder with its context dim
+        inst_img_idxs, inst_txt_idxs = prepare_idxs(img, self.instance_code_length, self.patch_size)
         txt_instance = torch.zeros(
-            (b, self.code_length, self.instance_encoder_context_dim), device=img.device
+            (b, self.instance_code_length, self.instance_encoder_context_dim), device=img.device
         )
-        _, code_instance, aux_instance = self.instance_encoder(img, img_idxs, txt_instance, txt_idxs, timesteps=None)
+        _, code_instance, aux_instance = self.instance_encoder(img, inst_img_idxs, txt_instance, inst_txt_idxs, timesteps=None)
 
         aux = {"aux_pose": aux_pose, "aux_instance": aux_instance}
         return code_instance, code_pose, aux
@@ -631,8 +638,8 @@ class FlowMo(nn.Module):
     @torch.no_grad()
     def encode_pose(self, img): # for inference
         b, c, h, w = img.shape
-        img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
-        txt = torch.zeros((b, self.code_length, self.pose_encoder_context_dim), device=img.device)
+        img_idxs, txt_idxs = prepare_idxs(img, self.pose_code_length, self.patch_size)
+        txt = torch.zeros((b, self.pose_code_length, self.pose_encoder_context_dim), device=img.device)
         _, code_pose, _ = self.pose_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
         code_pose, _, _ = self._quantize(code_pose, self.pose_quantization_type, deterministic=True)
         return code_pose
@@ -640,18 +647,23 @@ class FlowMo(nn.Module):
     @torch.no_grad()
     def encode_instance(self, img): # for inference
         b, c, h, w = img.shape
-        img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
-        txt = torch.zeros((b, self.code_length, self.instance_encoder_context_dim), device=img.device)
+        img_idxs, txt_idxs = prepare_idxs(img, self.instance_code_length, self.patch_size)
+        txt = torch.zeros((b, self.instance_code_length, self.instance_encoder_context_dim), device=img.device)
         _, code_instance, _ = self.instance_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
         code_instance, _, _ = self._quantize(code_instance, self.instance_quantization_type, deterministic=True)
         return code_instance
+
+    def _prepare_decoder_code(self, code_instance, code_pose):
+        proj_instance = self.instance_to_decoder(code_instance)
+        proj_pose = self.pose_to_decoder(code_pose)
+        return torch.cat([proj_instance, proj_pose], dim=1)
 
     def _decode(self, img, code, timesteps):
         b, c, h, w = img.shape
 
         img_idxs, txt_idxs = prepare_idxs(
             img,
-            self.code_length,
+            self.instance_code_length + self.pose_code_length,
             self.patch_size,
         )
         pred, _, decode_aux = self.decoder(
@@ -791,10 +803,10 @@ class FlowMo(nn.Module):
         code_pose_a, _, pose_loss_a = self._quantize(code_pose_a, self.pose_quantization_type)
         code_pose_b, _, pose_loss_b = self._quantize(code_pose_b, self.pose_quantization_type)
 
-        code_a_recon = torch.cat([code_instance_a, code_pose_a], dim=-1)
-        code_a_swap = torch.cat([code_instance_b, code_pose_a], dim=-1)
-        code_b_recon = torch.cat([code_instance_b, code_pose_b], dim=-1)
-        code_b_swap = torch.cat([code_instance_a, code_pose_b], dim=-1)
+        code_a_recon = self._prepare_decoder_code(code_instance_a, code_pose_a)
+        code_a_swap = self._prepare_decoder_code(code_instance_b, code_pose_a)
+        code_b_recon = self._prepare_decoder_code(code_instance_b, code_pose_b)
+        code_b_swap = self._prepare_decoder_code(code_instance_a, code_pose_b)
 
         codes = [code_a_recon, code_a_swap, code_b_recon, code_b_swap]
 
@@ -876,7 +888,7 @@ class FlowMo(nn.Module):
             
             for alpha in alphas:
                 pose_code = (1 - alpha) * pose_code_a + alpha * pose_code_b
-                code = torch.cat([instance_code, pose_code], dim=-1)
+                code = self._prepare_decoder_code(instance_code, pose_code)
                 
                 z = torch.randn((1, 3, h, w)).cuda()
                 mask = torch.ones_like(code[..., :1])
@@ -913,7 +925,7 @@ class FlowMo(nn.Module):
             pose_code = self.encode_pose(pose_images.cuda())
             instance_code = self.encode_instance(instance_images.cuda())
 
-            code = torch.cat([instance_code, pose_code], dim=-1)
+            code = self._prepare_decoder_code(instance_code, pose_code)
 
             z = torch.randn((bs, 3, h, w)).cuda()
 
