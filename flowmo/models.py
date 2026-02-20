@@ -1067,7 +1067,10 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
     effective_kl_weight = pose_kl_weight * anneal_factor
     weighted_pose_loss = effective_kl_weight * aux["pose_quantizer_loss"]
     aux["loss_dict"]["effective_kl_weight"] = torch.tensor(effective_kl_weight)
-    loss = loss + aux["instance_quantizer_loss"] + weighted_pose_loss + lpips_dist + aux["instance_contrastive_loss"]
+    contrastive_loss_weight = getattr(config.opt, 'contrastive_loss_weight', 1.0)
+    weighted_contrastive_loss = contrastive_loss_weight * aux["instance_contrastive_loss"]
+    aux["loss_dict"]["weighted_contrastive_loss"] = weighted_contrastive_loss
+    loss = loss + aux["instance_quantizer_loss"] + weighted_pose_loss + lpips_dist + weighted_contrastive_loss
     aux["loss_dict"]["total_loss"] = loss
 
     return loss, aux

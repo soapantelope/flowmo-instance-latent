@@ -38,7 +38,7 @@ model:
   dec_depth: 16
   enable_cfg: True
 
-  infonce_temp: 0.3
+  infonce_temp: 0.07
 
   ema_decay: 0.9999
 
@@ -59,6 +59,7 @@ opt:
   lpips_mode: "vgg"
   pose_kl_weight: 0.01 # only used when pose_quantization_type is kl (per-dimension, since KL uses mean not sum)
   pose_kl_anneal_steps: 100000 # linearly ramp KL weight from 0 to pose_kl_weight over this many steps (0 = no annealing)
+  contrastive_loss_weight: 0.05
 
   beta1: .9
   beta2: .95
