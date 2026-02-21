@@ -154,8 +154,10 @@ def create_visualization(image_a, image_b, generations, instance_id, pose_a_id, 
     print(f"Saved: {save_path}")
 
 
-def create_interpolation_visualization(image_a, image_b, interpolated_images, instance_id, pose_a_id, pose_b_id, save_path):
+def create_interpolation_visualization(image_a, image_b, interpolated_images, instance_id,
+                                       pose_a_id, pose_b_id, save_path, method="linear"):
     num_steps = len(interpolated_images)
+    method_label = method.upper()
     
     fig, axes = plt.subplots(2, num_steps + 2, figsize=(3 * (num_steps + 2), 6))
     
@@ -184,15 +186,63 @@ def create_interpolation_visualization(image_a, image_b, interpolated_images, in
     axes[1, num_steps + 1].set_title(f"Original B", fontsize=10, color='green')
     axes[1, num_steps + 1].axis('off')
     
-    plt.suptitle(f"Pose Interpolation: {instance_id} | Poses: {pose_a_id} → {pose_b_id}\n"
+    plt.suptitle(f"Pose Interpolation ({method_label}): {instance_id} | Poses: {pose_a_id} → {pose_b_id}\n"
                  f"Instance from A, Pose interpolated from A to B", 
                  fontsize=14, y=0.98)
     
     fig.text(0.5, 0.02, 
-             "Bottom row: Generated images with fixed instance (from A) and linearly interpolated pose latent",
+             f"Bottom row: Generated images with fixed instance (from A) and {method} interpolated pose latent",
              ha='center', fontsize=10, style='italic')
     
     plt.tight_layout(rect=[0, 0.05, 1, 0.93])
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {save_path}")
+
+
+def create_slerp_comparison_visualization(image_a, image_b, lerp_images, slerp_images,
+                                          instance_id, pose_a_id, pose_b_id, save_path):
+    """Side-by-side comparison of linear vs spherical interpolation."""
+    num_steps = len(lerp_images)
+    ncols = num_steps + 2
+
+    fig, axes = plt.subplots(3, ncols, figsize=(3 * ncols, 9))
+
+    # Row 0: originals header
+    axes[0, 0].imshow(tensor_to_display(image_a).transpose(1, 2, 0))
+    axes[0, 0].set_title("Original A", fontsize=10, fontweight='bold')
+    axes[0, 0].axis('off')
+    for i in range(1, ncols - 1):
+        axes[0, i].axis('off')
+    axes[0, ncols - 1].imshow(tensor_to_display(image_b).transpose(1, 2, 0))
+    axes[0, ncols - 1].set_title("Original B", fontsize=10, fontweight='bold')
+    axes[0, ncols - 1].axis('off')
+
+    for row_idx, (images, label) in enumerate([(lerp_images, "LERP"), (slerp_images, "SLERP")]):
+        r = row_idx + 1
+        axes[r, 0].imshow(tensor_to_display(image_a).transpose(1, 2, 0))
+        axes[r, 0].set_title(f"{label}\nα=0.00", fontsize=9, color='green')
+        axes[r, 0].axis('off')
+
+        for i, img in enumerate(images):
+            alpha = i / (num_steps - 1) if num_steps > 1 else 0
+            axes[r, i + 1].imshow(tensor_to_display(img[0]).transpose(1, 2, 0))
+            axes[r, i + 1].set_title(f"α={alpha:.2f}", fontsize=9)
+            axes[r, i + 1].axis('off')
+
+        axes[r, ncols - 1].imshow(tensor_to_display(image_b).transpose(1, 2, 0))
+        axes[r, ncols - 1].set_title(f"{label}\nα=1.00", fontsize=9, color='green')
+        axes[r, ncols - 1].axis('off')
+
+    plt.suptitle(
+        f"LERP vs SLERP Pose Interpolation\n"
+        f"Instance: {instance_id} | Poses: {pose_a_id} → {pose_b_id}",
+        fontsize=14, y=0.99,
+    )
+    fig.text(0.5, 0.01,
+             "Row 1: Linear interpolation | Row 2: Spherical interpolation (slerp)",
+             ha='center', fontsize=10, style='italic')
+    plt.tight_layout(rect=[0, 0.03, 1, 0.94])
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Saved: {save_path}")
@@ -298,6 +348,9 @@ def main():
                         help="Run pose interpolation between the two poses")
     parser.add_argument("--interpolate-steps", type=int, default=5,
                         help="Number of interpolation steps (including endpoints)")
+    parser.add_argument("--slerp", action="store_true",
+                        help="Use spherical interpolation (slerp) instead of linear; "
+                             "when combined with --interpolate, also saves a side-by-side comparison")
     args = parser.parse_args()
     
     os.makedirs(args.output_dir, exist_ok=True)
@@ -403,32 +456,53 @@ def main():
         print(f"Saved: {save_path}")
     
     if args.interpolate:
-        print(f"\nRunning pose interpolation ({args.interpolate_steps} steps)...")
+        interp_method = "slerp" if args.slerp else "linear"
+        print(f"\nRunning pose interpolation ({args.interpolate_steps} steps, {interp_method})...")
         with torch.no_grad():
             interpolated_images = model.generate_pose_interpolation(
                 instance_image=image_a_batch,
                 pose_image_a=image_a_batch,
                 pose_image_b=image_b_batch,
                 num_steps=args.interpolate_steps,
+                interpolation=interp_method,
             )
         
+        tag = f"pose_interpolation_{interp_method}"
         create_interpolation_visualization(
             image_a, image_b, interpolated_images,
             args.instance, args.pose_a, args.pose_b,
-            os.path.join(args.output_dir, "pose_interpolation.png")
+            os.path.join(args.output_dir, f"{tag}.png"),
+            method=interp_method,
         )
         
         for i, img in enumerate(interpolated_images):
             alpha = i / (args.interpolate_steps - 1) if args.interpolate_steps > 1 else 0
-            save_path = os.path.join(args.output_dir, f"interp_{i:02d}_alpha_{alpha:.2f}.png")
+            save_path = os.path.join(args.output_dir, f"interp_{interp_method}_{i:02d}_alpha_{alpha:.2f}.png")
             img_np = (tensor_to_display(img[0]).transpose(1, 2, 0) * 255).astype(np.uint8)
             Image.fromarray(img_np).save(save_path)
             print(f"Saved: {save_path}")
+
+        if args.slerp:
+            print(f"\nRunning linear interpolation for comparison...")
+            with torch.no_grad():
+                lerp_images = model.generate_pose_interpolation(
+                    instance_image=image_a_batch,
+                    pose_image_a=image_a_batch,
+                    pose_image_b=image_b_batch,
+                    num_steps=args.interpolate_steps,
+                    interpolation="linear",
+                )
+            create_slerp_comparison_visualization(
+                image_a, image_b, lerp_images, interpolated_images,
+                args.instance, args.pose_a, args.pose_b,
+                os.path.join(args.output_dir, "slerp_vs_lerp_comparison.png"),
+            )
     
     print(f"\n✓ All outputs saved to: {args.output_dir}")
-    print("\nUsage example:")
+    print("\nUsage examples:")
     print(f"  python infer.py --checkpoint path/to/ckpt.pth --instance 0 --pose-a 0 --pose-b 199")
     print(f"  python infer.py --checkpoint path/to/ckpt.pth --instance 0 --pose-a 0 --pose-b 199 --interpolate --interpolate-steps 7")
+    print(f"  python infer.py --checkpoint path/to/ckpt.pth --instance 0 --pose-a 0 --pose-b 199 --interpolate --slerp")
     print("\nKey test: Do 'b_inst_a_pose' and 'a_inst_b_pose' match originals A and B?")
     print("If yes → instance codes are properly disentangled from pose!")
 

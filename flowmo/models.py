@@ -860,8 +860,42 @@ class FlowMo(nn.Module):
                 z = z - dt[:, None, None, None] * vc
         return z
 
+    @staticmethod
+    def _slerp(v0, v1, t):
+        """Spherical linear interpolation between two tensors along the last dim.
+
+        Falls back to linear interpolation when vectors are nearly parallel.
+        """
+        v0_norm = torch.nn.functional.normalize(v0, dim=-1)
+        v1_norm = torch.nn.functional.normalize(v1, dim=-1)
+        dot = (v0_norm * v1_norm).sum(dim=-1, keepdim=True).clamp(-1, 1)
+        omega = torch.acos(dot)
+
+        sin_omega = torch.sin(omega)
+        near_parallel = (sin_omega.abs() < 1e-6)
+
+        coeff0 = torch.sin((1 - t) * omega) / sin_omega
+        coeff1 = torch.sin(t * omega) / sin_omega
+
+        coeff0 = torch.where(near_parallel, 1 - t, coeff0)
+        coeff1 = torch.where(near_parallel, t, coeff1)
+
+        # Preserve original magnitude via lerp of norms
+        mag0 = v0.norm(dim=-1, keepdim=True)
+        mag1 = v1.norm(dim=-1, keepdim=True)
+        mag = (1 - t) * mag0 + t * mag1
+
+        direction = coeff0 * v0_norm + coeff1 * v1_norm
+        return mag * torch.nn.functional.normalize(direction, dim=-1)
+
     @torch.no_grad()
-    def generate_pose_interpolation(self, instance_image, pose_image_a, pose_image_b, num_steps=5, dtype=torch.bfloat16):
+    def generate_pose_interpolation(self, instance_image, pose_image_a, pose_image_b,
+                                    num_steps=5, interpolation="linear", dtype=torch.bfloat16):
+        """Interpolate between two pose latents and decode each step.
+
+        Args:
+            interpolation: "linear" for lerp, "slerp" for spherical interpolation.
+        """
         config = self.config.eval.sampling
         
         with torch.autocast("cuda", dtype=dtype):
@@ -875,7 +909,10 @@ class FlowMo(nn.Module):
             alphas = torch.linspace(0, 1, num_steps, device=pose_code_a.device)
             
             for alpha in alphas:
-                pose_code = (1 - alpha) * pose_code_a + alpha * pose_code_b
+                if interpolation == "slerp":
+                    pose_code = self._slerp(pose_code_a, pose_code_b, alpha)
+                else:
+                    pose_code = (1 - alpha) * pose_code_a + alpha * pose_code_b
                 code = torch.cat([instance_code, pose_code], dim=-1)
                 
                 z = torch.randn((1, 3, h, w)).cuda()
