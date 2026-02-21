@@ -85,6 +85,42 @@ def _kl_diagonal_gaussian(mean, logvar):
     return 0.5 * torch.mean(torch.pow(mean, 2) + var - 1.0 - logvar)
 
 
+def _slerp(a, b, t):
+    """Spherical linear interpolation between tensors a and b.
+    
+    Args:
+        a: Starting tensor of shape [..., dim]
+        b: Ending tensor of shape [..., dim]
+        t: Interpolation parameter in [0, 1]
+    
+    Returns:
+        Interpolated tensor of the same shape as a and b
+    """
+    a_norm = F.normalize(a, dim=-1)
+    b_norm = F.normalize(b, dim=-1)
+    
+    dot = (a_norm * b_norm).sum(dim=-1, keepdim=True).clamp(-1, 1)
+    omega = torch.acos(dot)
+    
+    sin_omega = torch.sin(omega)
+    
+    # Fall back to linear interpolation when vectors are nearly parallel
+    linear_interp = (1 - t) * a + t * b
+    
+    # Slerp formula: sin((1-t)*ω)/sin(ω) * a + sin(t*ω)/sin(ω) * b
+    # Use original vectors (not normalized) to preserve magnitude
+    a_mag = a.norm(dim=-1, keepdim=True)
+    b_mag = b.norm(dim=-1, keepdim=True)
+    interp_mag = (1 - t) * a_mag + t * b_mag
+    
+    slerp_result = (torch.sin((1 - t) * omega) / sin_omega) * a_norm + \
+                   (torch.sin(t * omega) / sin_omega) * b_norm
+    slerp_result = slerp_result * interp_mag
+    
+    # Use linear interpolation when sin(omega) is close to 0
+    return torch.where(sin_omega.abs() < 1e-6, linear_interp, slerp_result)
+
+
 class EmbedND(nn.Module):
     def __init__(self, dim: int, theta: int, axes_dim):
         super().__init__()
@@ -875,7 +911,7 @@ class FlowMo(nn.Module):
             alphas = torch.linspace(0, 1, num_steps, device=pose_code_a.device)
             
             for alpha in alphas:
-                pose_code = (1 - alpha) * pose_code_a + alpha * pose_code_b
+                pose_code = _slerp(pose_code_a, pose_code_b, alpha)
                 code = torch.cat([instance_code, pose_code], dim=-1)
                 
                 z = torch.randn((1, 3, h, w)).cuda()
