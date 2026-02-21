@@ -636,6 +636,20 @@ class FlowMo(nn.Module):
         _, code_pose, _ = self.pose_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
         code_pose, _, _ = self._quantize(code_pose, self.pose_quantization_type, deterministic=True)
         return code_pose
+
+    @torch.no_grad()
+    def encode_pose_distribution(self, img):
+        """Return (mean, logvar) of the pose KL posterior before sampling."""
+        assert self.pose_quantization_type == "kl", \
+            f"encode_pose_distribution requires kl pose quantization, got {self.pose_quantization_type}"
+        b, c, h, w = img.shape
+        img_idxs, txt_idxs = prepare_idxs(img, self.code_length, self.patch_size)
+        txt = torch.zeros((b, self.code_length, self.pose_encoder_context_dim), device=img.device)
+        _, code_pose, _ = self.pose_encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+        mean, logvar = _get_diagonal_gaussian(
+            einops.rearrange(code_pose, "b t f -> b (f t)")
+        )
+        return mean, logvar
     
     @torch.no_grad()
     def encode_instance(self, img): # for inference
@@ -935,6 +949,57 @@ class FlowMo(nn.Module):
                 interpolated_images.append(sample.to(torch.float32))
                     
         return interpolated_images
+
+    @torch.no_grad()
+    def generate_from_pose_samples(self, instance_image, pose_image, num_samples=8,
+                                   temperature=1.0, dtype=torch.bfloat16):
+        """Sample diverse poses from the KL posterior and decode.
+
+        Args:
+            instance_image: [1, C, H, W] image providing the instance latent.
+            pose_image: [1, C, H, W] image whose pose distribution is sampled.
+            num_samples: how many samples to draw.
+            temperature: scaling factor for the std-dev (1.0 = standard posterior).
+
+        Returns:
+            list of [1, C, H, W] generated images, plus the deterministic (mean) image.
+        """
+        config = self.config.eval.sampling
+
+        with torch.autocast("cuda", dtype=dtype):
+            _, c, h, w = instance_image.shape
+            instance_code = self.encode_instance(instance_image.cuda())
+            mean, logvar = self.encode_pose_distribution(pose_image.cuda())
+            t = self.code_length
+            f = mean.shape[1] // t
+
+            # Deterministic decode (mean)
+            pose_mean = einops.rearrange(mean, "b (f t) -> b t f", f=f, t=t)
+
+            results = []
+            for i in range(num_samples):
+                std = torch.exp(0.5 * logvar)
+                sampled = mean + temperature * std * torch.randn_like(mean)
+                pose_code = einops.rearrange(sampled, "b (f t) -> b t f", f=f, t=t)
+
+                code = torch.cat([instance_code, pose_code], dim=-1)
+                z = torch.randn((1, 3, h, w)).cuda()
+                mask = torch.ones_like(code[..., :1])
+                code = torch.concatenate([code * mask, mask], axis=-1)
+
+                cfg_mask = 0.0
+                null_code = code * cfg_mask if config.cfg != 1.0 else None
+
+                sample = rf_sample(
+                    self, z, code,
+                    null_code=null_code,
+                    sample_steps=config.sample_steps,
+                    cfg=config.cfg,
+                    schedule=config.schedule,
+                )[-1].clip(-1, 1)
+                results.append(sample.to(torch.float32))
+
+        return results
 
     @torch.no_grad()
     def generate_from_pose_instance(self, pose_images, instance_images, dtype=torch.bfloat16):
