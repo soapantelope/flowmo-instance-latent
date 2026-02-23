@@ -15,8 +15,8 @@ data:
 
 model:
   enable_mup: True
-  patch_size: 4
-  mup_width: 6
+  patch_size: 8
+  mup_width: 4
   enc_mup_width: 4
 
   fix_initial_norms: True
@@ -25,10 +25,10 @@ model:
   quantization_type: lfq # not using this anymore
   pose_quantization_type: kl
   instance_quantization_type: lfq
-  code_length: 256
-  context_dim: 18 # default
-  pose_context_dim: 4 # for KL loss this is for mean only btw, so actual context dim would be 2x this
+  pose_context_dim: 18
+  pose_code_length: 16
   instance_context_dim: 18
+  instance_code_length: 256
   codebook_size_for_entropy: 9
   entropy_loss_weight: 0.0025
   commit_loss_weight: 0.000625
