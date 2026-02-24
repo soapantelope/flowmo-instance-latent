@@ -22,9 +22,10 @@ from flowmo import lookup_free_quantize
 MUP_ENABLED = True
 
 
-def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:
+def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor = None) -> Tensor:
     b, h, l, d = q.shape
-    q, k = apply_rope(q, k, pe)
+    if pe is not None:
+        q, k = apply_rope(q, k, pe)
 
     if torch.__version__ == "2.0.1+cu117":  # tmp workaround
         if d != 64:
@@ -182,6 +183,26 @@ class SelfAttention(nn.Module):
         return x
 
 
+class CrossAttention(nn.Module):
+    def __init__(self, dim: int, num_heads: int = 8, qkv_bias: bool = False):
+        super().__init__()
+        self.num_heads = num_heads
+        self.q_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv_proj = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.norm = QKNorm(dim // num_heads)
+        self.proj = nn.Linear(dim, dim)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x: Tensor, context: Tensor) -> Tensor:
+        q = rearrange(self.q_proj(x), "B L (H D) -> B H L D", H=self.num_heads)
+        kv = rearrange(self.kv_proj(context), "B L (K H D) -> K B H L D", K=2, H=self.num_heads)
+        k, v = kv[0], kv[1]
+        q, k = self.norm(q, k, v)
+        x = attention(q, k, v)
+        return self.proj(x)
+
+
 @dataclass
 class ModulationOut:
     shift: Tensor
@@ -218,6 +239,7 @@ class DoubleStreamBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         qkv_bias: bool = False,
+        has_pose_cross_attn: bool = False,
     ):
         super().__init__()
 
@@ -250,7 +272,13 @@ class DoubleStreamBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
 
-    def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor):
+        if has_pose_cross_attn:
+            self.pose_cross_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+            self.pose_cross_attn = CrossAttention(
+                dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias
+            )
+
+    def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor, pose: Tensor = None):
         pe_single, pe_double = pe
         p = 1
         if vec is None:
@@ -286,13 +314,17 @@ class DoubleStreamBlock(nn.Module):
         attn = attention(q, k, v, pe=pe_double)
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
-        # calculate the img bloks
+        # calculate the img blocks
         img = img + img_mod1.gate * self.img_attn.proj(img_attn)
+
+        if pose is not None and hasattr(self, 'pose_cross_attn'):
+            img = img + self.pose_cross_attn(self.pose_cross_norm(img), pose)
+
         img = img + img_mod2.gate * self.img_mlp(
             (p + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift
         )
 
-        # calculate the txt bloks
+        # calculate the txt blocks
         txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
         txt = txt + txt_mod2.gate * self.txt_mlp(
             (p + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift
@@ -420,7 +452,7 @@ class Flux(nn.Module):
     Transformer model for flow matching on sequences.
     """
 
-    def __init__(self, params: FluxParams, name="", lsg=False):
+    def __init__(self, params: FluxParams, name="", lsg=False, pose_dim: int = 0):
         super().__init__()
 
         self.name = name
@@ -444,9 +476,12 @@ class Flux(nn.Module):
             dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim
         )
 
+        self.has_pose = pose_dim > 0
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
         self.txt_in = nn.Linear(params.context_dim, self.hidden_size)
+        if self.has_pose:
+            self.pose_in = nn.Linear(pose_dim, self.hidden_size)
 
         self.double_blocks = nn.ModuleList(
             [
@@ -455,6 +490,7 @@ class Flux(nn.Module):
                     self.num_heads,
                     mlp_ratio=params.mlp_ratio,
                     qkv_bias=params.qkv_bias,
+                    has_pose_cross_attn=self.has_pose,
                 )
                 for idx in range(params.depth)
             ]
@@ -474,6 +510,7 @@ class Flux(nn.Module):
         txt: Tensor,
         txt_ids: Tensor,
         timesteps: Tensor,
+        pose: Tensor = None,
     ) -> Tensor:
         b, c, h, w = img.shape
 
@@ -493,11 +530,14 @@ class Flux(nn.Module):
             vec = self.time_in(timestep_embedding(timesteps, 256))
 
         txt = self.txt_in(txt)
+        if self.has_pose and pose is not None:
+            pose = self.pose_in(pose)
+
         pe_single = self.pe_embedder(torch.cat((txt_ids,), dim=1))
         pe_double = self.pe_embedder(torch.cat((txt_ids, img_ids), dim=1))
 
         for block in self.double_blocks:
-            img, txt = block(img=img, txt=txt, pe=(pe_single, pe_double), vec=vec)
+            img, txt = block(img=img, txt=txt, pe=(pe_single, pe_double), vec=vec, pose=pose)
 
         img = self.final_layer_img(img, vec=vec)
         img = rearrange(
@@ -585,7 +625,7 @@ class FlowMo(nn.Module):
         )
         decoder_params = FluxParams(
             in_channels=3 * patch_size**2,
-            context_dim=instance_context_dim + 1,  # shared feature dim + mask (pose/instance cat along token dim)
+            context_dim=instance_context_dim + 1,  # instance + mask (pose goes through cross-attention)
             patch_size=patch_size,
             depth=dec_depth,
             **DIT_ZOO[self.dit_mode],
@@ -605,7 +645,7 @@ class FlowMo(nn.Module):
 
         self.pose_encoder = Flux(pose_encoder_params, name="pose_encoder")
         self.instance_encoder = Flux(instance_encoder_params, name="instance_encoder")
-        self.decoder = Flux(decoder_params, name="decoder")
+        self.decoder = Flux(decoder_params, name="decoder", pose_dim=pose_context_dim)
 
     @torch.compile
     # encodes pose and instance from an image
@@ -645,7 +685,7 @@ class FlowMo(nn.Module):
         code_instance, _, _ = self._quantize(code_instance, self.instance_quantization_type, deterministic=True)
         return code_instance
 
-    def _decode(self, img, code, timesteps):
+    def _decode(self, img, code, timesteps, pose=None):
         b, c, h, w = img.shape
 
         img_idxs, txt_idxs = prepare_idxs(
@@ -654,7 +694,7 @@ class FlowMo(nn.Module):
             self.patch_size,
         )
         pred, _, decode_aux = self.decoder(
-            img, img_idxs, code, txt_idxs, timesteps=timesteps
+            img, img_idxs, code, txt_idxs, timesteps=timesteps, pose=pose
         )
         return pred, decode_aux
 
@@ -790,12 +830,8 @@ class FlowMo(nn.Module):
         code_pose_a, _, pose_loss_a = self._quantize(code_pose_a, self.pose_quantization_type)
         code_pose_b, _, pose_loss_b = self._quantize(code_pose_b, self.pose_quantization_type)
 
-        code_a_recon = torch.cat([code_instance_a, code_pose_a], dim=1)
-        code_a_swap = torch.cat([code_instance_b, code_pose_a], dim=1)
-        code_b_recon = torch.cat([code_instance_b, code_pose_b], dim=1)
-        code_b_swap = torch.cat([code_instance_a, code_pose_b], dim=1)
-
-        codes = [code_a_recon, code_a_swap, code_b_recon, code_b_swap]
+        instance_codes = [code_instance_a, code_instance_b, code_instance_b, code_instance_a]
+        pose_codes = [code_pose_a, code_pose_a, code_pose_b, code_pose_b]
 
         aux["instance_quantizer_loss"] = inst_loss_a + inst_loss_b
         aux["pose_quantizer_loss"] = pose_loss_a + pose_loss_b
@@ -804,25 +840,24 @@ class FlowMo(nn.Module):
         instance_contrastive_loss = self.compute_infonce_loss(code_instance_a, code_instance_b)
         aux["instance_contrastive_loss"] = instance_contrastive_loss
 
-        # i might be able to do this better if i batch it properly but for now this is simpler
         v_ests = [] 
         posttrain_samples = []
-        for i, code in enumerate(codes):
-            b, t, f = code.shape
-
-            mask = torch.ones_like(code[..., :1])
-            code = torch.concatenate([code, mask], axis=-1)
+        for i, (inst_code, p_code) in enumerate(zip(instance_codes, pose_codes)):
+            mask = torch.ones_like(inst_code[..., :1])
+            code = torch.cat([inst_code, mask], dim=-1)
             code_pre_cfg = code
+            pose = p_code
 
             if self.config.model.enable_cfg and enable_cfg:
-                cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None]
+                cfg_mask = (torch.rand((B,), device=code.device) > 0.1)[:, None, None]
                 code = code * cfg_mask
+                pose = pose * cfg_mask
 
-            v_est, decode_aux = self.decode(noised_batch[:, i], code, timesteps)
+            v_est, decode_aux = self.decode(noised_batch[:, i], code, timesteps, pose=pose)
             v_ests.append(v_est)
 
             if self.config.model.posttrain_sample:
-                posttrain_sample = self.reconstruct_checkpoint(code_pre_cfg)
+                posttrain_sample = self.reconstruct_checkpoint(code_pre_cfg, pose=p_code)
                 posttrain_samples.append(posttrain_sample)
 
         v_ests = torch.stack(v_ests, dim=1) # [B, 4, C, H, W]
@@ -832,7 +867,7 @@ class FlowMo(nn.Module):
 
         return v_ests, aux
 
-    def reconstruct_checkpoint(self, code):
+    def reconstruct_checkpoint(self, code, pose=None):
         with torch.autocast(
             "cuda",
             dtype=torch.bfloat16,
@@ -851,10 +886,12 @@ class FlowMo(nn.Module):
                         :, None, None
                     ].to(code.dtype)
                     code_t = code * mask
+                    pose_t = pose * mask if pose is not None else None
                 else:
                     code_t = code
+                    pose_t = pose
 
-                vc, _ = self.decode_checkpointed(z, code_t, t)
+                vc, _ = self.decode_checkpointed(z, code_t, t, pose_t)
 
                 z = z - dt[:, None, None, None] * vc
         return z
@@ -870,19 +907,18 @@ class FlowMo(nn.Module):
             pose_code_a = self.encode_pose(pose_image_a.cuda())
             pose_code_b = self.encode_pose(pose_image_b.cuda())
             
+            mask = torch.ones_like(instance_code[..., :1])
+            code = torch.cat([instance_code, mask], dim=-1)
+            null_code = code * 0.0 if config.cfg != 1.0 else None
+
             interpolated_images = []
             alphas = torch.linspace(0, 1, num_steps, device=pose_code_a.device)
             
             for alpha in alphas:
                 pose_code = (1 - alpha) * pose_code_a + alpha * pose_code_b
-                code = torch.cat([instance_code, pose_code], dim=1)
+                null_pose = pose_code * 0.0 if config.cfg != 1.0 else None
                 
                 z = torch.randn((1, 3, h, w)).cuda()
-                mask = torch.ones_like(code[..., :1])
-                code = torch.concatenate([code, mask], axis=-1)
-                
-                cfg_mask = 0.0
-                null_code = code * cfg_mask if config.cfg != 1.0 else None
                 
                 sample = rf_sample(
                     self,
@@ -892,6 +928,8 @@ class FlowMo(nn.Module):
                     sample_steps=config.sample_steps,
                     cfg=config.cfg,
                     schedule=config.schedule,
+                    pose=pose_code,
+                    null_pose=null_pose,
                 )[-1].clip(-1, 1)
                 
                 interpolated_images.append(sample.to(torch.float32))
@@ -912,15 +950,13 @@ class FlowMo(nn.Module):
             pose_code = self.encode_pose(pose_images.cuda())
             instance_code = self.encode_instance(instance_images.cuda())
 
-            code = torch.cat([instance_code, pose_code], dim=1)
+            mask = torch.ones_like(instance_code[..., :1])
+            code = torch.cat([instance_code, mask], dim=-1)
 
             z = torch.randn((bs, 3, h, w)).cuda()
 
-            mask = torch.ones_like(code[..., :1])
-            code = torch.concatenate([code, mask], axis=-1)
-
-            cfg_mask = 0.0
-            null_code = code * cfg_mask if config.cfg != 1.0 else None
+            null_code = code * 0.0 if config.cfg != 1.0 else None
+            null_pose = pose_code * 0.0 if config.cfg != 1.0 else None
 
             samples = rf_sample(
                 model,
@@ -930,6 +966,8 @@ class FlowMo(nn.Module):
                 sample_steps=config.sample_steps,
                 cfg=config.cfg,
                 schedule=config.schedule,
+                pose=pose_code,
+                null_pose=null_pose,
             )[-1].clip(-1, 1)
         return samples.to(torch.float32)
 
@@ -1075,6 +1113,8 @@ def rf_sample(
     sample_steps=25,
     cfg=2.0,
     schedule="linear",
+    pose=None,
+    null_pose=None,
 ):
     b = z.size(0)
     if schedule == "linear":
@@ -1099,14 +1139,14 @@ def rf_sample(
     for i, (t, dt) in enumerate((zip(ts, dts))):
         timesteps = torch.tensor([t] * b).to(z.device)
         vc, decode_aux = model.decode(
-            img=z, timesteps=timesteps, code=code
+            img=z, timesteps=timesteps, code=code, pose=pose
         )
 
         if null_code is not None and (
             interval is None
             or ((t.item() >= interval[0]) and (t.item() <= interval[1]))
         ):
-            vu, _ = model.decode(img=z, timesteps=timesteps, code=null_code)
+            vu, _ = model.decode(img=z, timesteps=timesteps, code=null_code, pose=null_pose)
             vc = vu + cfg * (vc - vu)
 
         z = z - dt * vc
