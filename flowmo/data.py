@@ -20,46 +20,55 @@ class PairDataset(Dataset):
         self.preprocessor = T.Compose([self.rescaler, self.cropper])
         
         self.instances = []
-        self.instance_to_frames = defaultdict(list) # instance : list of its frames
+        self.instance_to_frames = defaultdict(list) # instance : list of its file PATHS
 
         self.num_frames = 0
-        self._load_all_images(data_root)
+        self._load_all_image_paths(data_root)
     
-    def _load_all_images(self, data_root):
-        print("loading images")
+    def _load_all_image_paths(self, data_root):
+        print("Scanning image paths...")
         
         for root, dirs, files in os.walk(data_root):
-            for i, file in enumerate(files):
+            for file in files:
                 if not file.lower().endswith(('.png', '.jpg', '.jpeg')):
                     continue
-                if i % 500 == 0:
-                    print(f"{i} images loaded into memory so far...")
 
                 instance, _ = file.rsplit('_', 1)
 
+                # Store the PATH string, NOT the loaded image
                 path = os.path.join(root, file)
-                image = Image.open(path).convert("RGB")
-                image = self.preprocessor(image)
-                image = np.array(image)
-                image = (image / 127.5 - 1.0).astype(np.float32)
                 
                 if instance not in self.instance_to_frames:
                     self.instances.append(instance)
 
-                self.instance_to_frames[instance].append(image)
+                self.instance_to_frames[instance].append(path)
                 self.num_frames += 1
                 
-        print(f"all images loaded into memory!")
+        print(f"Found {self.num_frames} images across {len(self.instances)} instances")
     
     def __len__(self):
         return len(self.instances) * 100 # each epoch will just be num_instances pairs * 100 random pairs
     
+    def _load_and_process_image(self, path):
+        # Heavy lifting happens here, purely on-demand
+        image = Image.open(path).convert("RGB")
+        image = self.preprocessor(image)
+        image = np.array(image)
+        image = (image / 127.5 - 1.0).astype(np.float32)
+        return image
+
     def __getitem__(self, idx):
         idx %= len(self.instances)
-        p1, p2 = random.sample(self.instance_to_frames[self.instances[idx]], 2)
+        
+        # Pick two random paths for this instance
+        path1, path2 = random.sample(self.instance_to_frames[self.instances[idx]], 2)
+        
+        # Load and process only those two specific images
+        p1 = self._load_and_process_image(path1)
+        p2 = self._load_and_process_image(path2)
         
         return {
-            "images": np.stack([p1, p2], axis=0),
+            "images": torch.from_numpy(np.stack([p1, p2], axis=0)),
         }
 
 

@@ -787,17 +787,17 @@ class FlowMo(nn.Module):
         code_a = F.normalize(code_a, dim=-1) # [B, F]
         code_b = F.normalize(code_b, dim=-1)
 
-        codes = torch.cat([code_a, code_b], dim=0)
+        codes = torch.cat([code_a, code_b], dim=0) # [2B, F]
 
-        similarity_matrix = torch.matmul(codes, codes.T) / self.config.model.infonce_temp
+        similarity_matrix = torch.matmul(codes, codes.T) / self.config.model.infonce_temp # [2B, 2B]
 
         labels = torch.cat([
             torch.arange(B, 2*B, device=codes.device), 
             torch.arange(0, B, device=codes.device),
-        ])
+        ]) # [2B], code_a[i] should match code_b[i]
 
         mask = torch.eye(2*B, device=codes.device, dtype=torch.bool)
-        similarity_matrix = similarity_matrix.masked_fill(mask, float('-inf'))
+        similarity_matrix = similarity_matrix.masked_fill(mask, float('-inf')) # mask out self-similarity
 
         loss = F.cross_entropy(similarity_matrix, labels)
     
@@ -815,11 +815,11 @@ class FlowMo(nn.Module):
         aux = {}
         B, _, C, H, W = batch.shape
 
-        a = batch[:, 0] # instance i, pose p1
-        b = batch[:, 2] # instance i, pose p2
+        a = batch[:, 0] # instance i, pose p1, shape [batch_size, C, H, W]
+        b = batch[:, 2] # instance i, pose p2, shape [batch_size, C, H, W]
 
-        code_instance_a, code_pose_a, encode_aux_a = self.encode(a)
-        code_instance_b, code_pose_b, encode_aux_b = self.encode(b)
+        code_instance_a, code_pose_a, encode_aux_a = self.encode(a) # each of shape [batch_size, code_length, context_dim]
+        code_instance_b, code_pose_b, encode_aux_b = self.encode(b) # each of shape [batch_size, code_length, context_dim]
 
         # quantize separately bc different quantization types
         code_instance_a, _, inst_loss_a = self._quantize(code_instance_a, self.instance_quantization_type)
@@ -827,7 +827,7 @@ class FlowMo(nn.Module):
         code_pose_a, _, pose_loss_a = self._quantize(code_pose_a, self.pose_quantization_type)
         code_pose_b, _, pose_loss_b = self._quantize(code_pose_b, self.pose_quantization_type)
 
-        code_a_recon = torch.cat([code_instance_a, code_pose_a], dim=-1)
+        code_a_recon = torch.cat([code_instance_a, code_pose_a], dim=-1) # shape [batch_size, code_length, instance_context_dim + pose_context_dim]
         code_a_swap = torch.cat([code_instance_b, code_pose_a], dim=-1)
         code_b_recon = torch.cat([code_instance_b, code_pose_b], dim=-1)
         code_b_swap = torch.cat([code_instance_a, code_pose_b], dim=-1)
@@ -847,15 +847,15 @@ class FlowMo(nn.Module):
         for i, code in enumerate(codes):
             b, t, f = code.shape
 
-            mask = torch.ones_like(code[..., :1])
-            code = torch.concatenate([code, mask], axis=-1)
+            mask = torch.ones_like(code[..., :1]) # shape [b, t, 1]
+            code = torch.concatenate([code, mask], axis=-1) # shape [b, t, f+1]
             code_pre_cfg = code
 
             if self.config.model.enable_cfg and enable_cfg:
-                cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None]
+                cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None] # shape [b, 1, 1]
                 code = code * cfg_mask
 
-            v_est, decode_aux = self.decode(noised_batch[:, i], code, timesteps)
+            v_est, decode_aux = self.decode(noised_batch[:, i], code, timesteps) # cfg_masked codes are zeroed out, so the model only denoises based on the noised image, not the code
             v_ests.append(v_est)
 
             if self.config.model.posttrain_sample:
@@ -893,7 +893,7 @@ class FlowMo(nn.Module):
 
                 vc, _ = self.decode_checkpointed(z, code_t, t)
 
-                z = z - dt[:, None, None, None] * vc
+                z = z - dt[:, None, None, None] * vc # flow-matching update
         return z
 
     @torch.no_grad()
@@ -1014,7 +1014,7 @@ class FlowMo(nn.Module):
         # return samples.to(torch.float32)
 
 
-def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W]
+def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, C, H, W]
 
     x = batch["images"]
 
@@ -1054,7 +1054,7 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
         timesteps=t,
     )
 
-    diff = z1 - vthetas - x
+    diff = z1 - vthetas - x # z1 is ground-truth (added) noise
     x_preds = zt - vthetas * t_expanded
 
     loss = ((diff) ** 2).mean()
@@ -1070,8 +1070,8 @@ def rf_loss(config, model, batch, aux_state): # batch is [batch_size, 2, 3, H, W
         if config.model.posttrain_sample:
             x_preds = aux["posttrain_samples"]
 
-        x_flat = x.reshape(b * 4, *x.shape[2:])
-        x_preds_flat = x_preds.reshape(b * 4, *x_preds.shape[2:])
+        x_flat = x.reshape(b * 4, *x.shape[2:]) # [B*4, C, H, W]
+        x_preds_flat = x_preds.reshape(b * 4, *x_preds.shape[2:]) # [B*4, C, H, W]
 
         lpips_dist = aux_state["lpips_model"](x_flat, x_preds_flat)
         lpips_dist = (config.opt.lpips_weight * lpips_dist).mean()

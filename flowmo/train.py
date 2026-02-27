@@ -14,7 +14,7 @@ import torch.optim as optim
 from mup import MuAdam, MuAdamW
 from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 from flowmo import models, perceptual_loss, train_utils
 
@@ -41,11 +41,11 @@ def train_step(config, model, batch, optimizer, aux_state):
 
     optimizer.zero_grad()
     b = batch["images"].shape[0]
-    chunksize = b // config.opt.n_grad_acc
+    chunksize = b // config.opt.n_grad_acc # B // n_grad_acc(2)
     batch_chunks = [
         {k: v[i * chunksize : (i + 1) * chunksize] for (k, v) in batch.items()}
         for i in range(config.opt.n_grad_acc)
-    ]
+    ] # each chunk has shape [B // n_grad_acc, 2, C, H, W]
 
     total_loss = 0.0
     assert len(batch_chunks) == config.opt.n_grad_acc
@@ -159,7 +159,12 @@ def main(args, config):
     train_dataloader = train_utils.load_dataset(config, split='train')
 
     if rank == 0:
-        writer = SummaryWriter(log_dir)
+        wandb.init(
+            entity="neurok2d",
+            project=args.experiment_name,
+            dir=log_dir,
+            config=OmegaConf.to_container(config, resolve=True),
+        )
 
     total_steps = 0
 
@@ -229,7 +234,7 @@ def main(args, config):
         dl_toc = time.time()
         if dl_toc - dl_tic > 1.0:
             print(f"Dataloader took {dl_toc - dl_tic} seconds!")
-        images = batch["images"]
+        images = batch["images"] # [8, 2, 3, 256, 256]
 
         aux_state["total_steps"] = total_steps
 
@@ -297,10 +302,9 @@ def main(args, config):
             )
 
             if rank == 0:
-                for k, v in running_losses.items():
-                    writer.add_scalar(k, v, global_step=total_steps)
-                writer.add_scalar(
-                    "Steps per sec", steps_per_sec, global_step=total_steps
+                wandb.log(
+                    {**running_losses, "Steps per sec": steps_per_sec},
+                    step=total_steps,
                 )
 
             tic = time.time()

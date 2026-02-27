@@ -37,3 +37,8 @@ Thumbs.db
 
 imagenet_train_index_overall.json
 imagenet_val_index_overall.json
+
+
+# ---- Experiments ----
+inference*/
+results*/
