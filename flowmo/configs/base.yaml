@@ -38,6 +38,7 @@ model:
   enable_cfg: True
 
   infonce_temp: 0.3
+  infonce_weight: 1.0
 
   ema_decay: 0.9999
 
