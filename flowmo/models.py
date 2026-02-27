@@ -191,8 +191,6 @@ class CrossAttention(nn.Module):
         self.kv_proj = nn.Linear(dim, dim * 2, bias=qkv_bias)
         self.norm = QKNorm(dim // num_heads)
         self.proj = nn.Linear(dim, dim)
-        nn.init.zeros_(self.proj.weight)
-        nn.init.zeros_(self.proj.bias)
 
     def forward(self, x: Tensor, context: Tensor) -> Tensor:
         q = rearrange(self.q_proj(x), "B L (H D) -> B H L D", H=self.num_heads)
@@ -556,7 +554,7 @@ class Flux(nn.Module):
 def get_weights_to_fix(model):
     with torch.no_grad():
         for name, module in itertools.chain(model.named_modules()):
-            if "double_blocks" in name and isinstance(module, torch.nn.Linear):
+            if "double_blocks" in name and "pose_cross" not in name and isinstance(module, torch.nn.Linear):
                 yield name, module.weight
 
 
