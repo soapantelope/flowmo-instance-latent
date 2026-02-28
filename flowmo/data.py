@@ -55,6 +55,7 @@ class PairDataset(Dataset):
                 self.num_frames += 1
                 
         print(f"all images loaded into memory! {len(self.instances)} instances, {self.num_frames} frames")
+        print(f"instances: {self.instances}")
     
     def __len__(self):
         return len(self.instances) * 100 # each epoch will just be num_instances pairs * 100 random pairs
