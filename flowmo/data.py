@@ -12,11 +12,10 @@ from torch.utils.data import Dataset
 
 class PairDataset(Dataset):
     def __init__(self, data_root, size=256, random_crop=False,
-                 max_instances=None, max_poses_per_instance=None):
+                 max_instances=None):
         self.data_root = data_root
         self.size = size
         self.max_instances = max_instances
-        self.max_poses_per_instance = max_poses_per_instance
         
         self.rescaler = T.Resize(size)
         self.cropper = T.RandomCrop((size, size)) if random_crop else T.CenterCrop((size, size))
@@ -41,8 +40,6 @@ class PairDataset(Dataset):
                 instance, _ = file.rsplit('_', 1)
 
                 if self.max_instances and instance not in self.instance_to_frames and len(self.instances) >= self.max_instances:
-                    continue
-                if self.max_poses_per_instance and len(self.instance_to_frames[instance]) >= self.max_poses_per_instance:
                     continue
 
                 path = os.path.join(root, file)
