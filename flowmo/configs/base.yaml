@@ -39,6 +39,8 @@ model:
 
   infonce_temp: 0.3
   infonce_weight: 1.0
+  # MOCO-style queue size for instance InfoNCE (0 = in-batch negatives only)
+  infonce_queue_size: 4096
 
   ema_decay: 0.9999
 

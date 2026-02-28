@@ -642,6 +642,15 @@ class FlowMo(nn.Module):
         self.instance_encoder = Flux(instance_encoder_params, name="instance_encoder")
         self.decoder = Flux(decoder_params, name="decoder")
 
+        # MOCO-style queue for InfoNCE (reduces noise when batch size is small)
+        self.infonce_queue_size = getattr(config.model, "infonce_queue_size", 0)
+        if self.infonce_queue_size > 0:
+            self.register_buffer(
+                "infonce_queue",
+                torch.zeros(self.infonce_queue_size, instance_context_dim),
+            )
+            self.register_buffer("infonce_queue_ptr", torch.zeros(1, dtype=torch.long))
+
     @torch.compile
     # encodes pose and instance from an image
     def encode(self, img):
@@ -771,36 +780,52 @@ class FlowMo(nn.Module):
         return quantized, indices, quantizer_loss
 
     def compute_infonce_loss(
-        self, 
-        code_instance_a, # instance codes for pose p1 for each instance [batch_size, D, F]
-        code_instance_b, # instance codes for pose p2 for each instance
+        self,
+        code_instance_a,  # instance codes for pose p1 [batch_size, D, F]
+        code_instance_b,  # instance codes for pose p2 [batch_size, D, F]
     ):
-        # code_instance_a[i] = code_instance_b[i]
-        # code_instance_a[i] is pushed away from code_instance_b[not i]
-        # and pushed away from code_instance_a[not i]
-
+        # code_instance_a[i] should match code_instance_b[i] (same instance, different pose)
         B = code_instance_a.shape[0]
-
-        code_a = code_instance_a.mean(dim=1) # [B, F]
+        code_a = code_instance_a.mean(dim=1)  # [B, F]
         code_b = code_instance_b.mean(dim=1)
-
-        code_a = F.normalize(code_a, dim=-1) # [B, F]
+        code_a = F.normalize(code_a, dim=-1)
         code_b = F.normalize(code_b, dim=-1)
+        temp = self.config.model.infonce_temp
 
-        codes = torch.cat([code_a, code_b], dim=0) # [2B, F]
+        if self.infonce_queue_size > 0:
+            # MOCO-style: use queue as negatives to get many more than 2B-1
+            queue = self.infonce_queue  # [K, F]
+            # Positive logits: one per sample (query i vs key i)
+            l_pos = (code_a * code_b).sum(dim=-1, keepdim=True)  # [B, 1]
+            # Negative logits: query vs queue
+            l_neg = torch.matmul(code_a, queue.T)  # [B, K]
+            logits = torch.cat([l_pos, l_neg], dim=1) / temp  # [B, 1+K]
+            labels = torch.zeros(B, dtype=torch.long, device=code_a.device)  # positive at index 0
+            loss = F.cross_entropy(logits, labels)
 
-        similarity_matrix = torch.matmul(codes, codes.T) / self.config.model.infonce_temp # [2B, 2B]
+            # Enqueue current keys (code_b) when training; FIFO overwrite
+            if self.training:
+                ptr = int(self.infonce_queue_ptr.item())
+                K = self.infonce_queue_size
+                code_b_detach = code_b.detach()
+                if ptr + B <= K:
+                    self.infonce_queue[ptr : ptr + B] = code_b_detach
+                else:
+                    self.infonce_queue[ptr:] = code_b_detach[: K - ptr]
+                    self.infonce_queue[: B - (K - ptr)] = code_b_detach[K - ptr :]
+                self.infonce_queue_ptr[0] = (ptr + B) % K
+        else:
+            # Original in-batch only (no queue)
+            codes = torch.cat([code_a, code_b], dim=0)  # [2B, F]
+            similarity_matrix = torch.matmul(codes, codes.T) / temp  # [2B, 2B]
+            labels = torch.cat([
+                torch.arange(B, 2 * B, device=codes.device),
+                torch.arange(0, B, device=codes.device),
+            ])
+            mask = torch.eye(2 * B, device=codes.device, dtype=torch.bool)
+            similarity_matrix = similarity_matrix.masked_fill(mask, float("-inf"))
+            loss = F.cross_entropy(similarity_matrix, labels)
 
-        labels = torch.cat([
-            torch.arange(B, 2*B, device=codes.device), 
-            torch.arange(0, B, device=codes.device),
-        ]) # [2B], code_a[i] should match code_b[i]
-
-        mask = torch.eye(2*B, device=codes.device, dtype=torch.bool)
-        similarity_matrix = similarity_matrix.masked_fill(mask, float('-inf')) # mask out self-similarity
-
-        loss = F.cross_entropy(similarity_matrix, labels)
-    
         return loss
 
 
