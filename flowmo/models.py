@@ -724,7 +724,7 @@ class FlowMo(nn.Module):
             indices: token indices (only for lfq)
             quantizer_loss: scalar loss
         """
-        b, t, f = code.shape
+        b, t, f = code.shape # [B, 256, 8]
         indices = None
         if quantization_type == "noop":
             quantized = code

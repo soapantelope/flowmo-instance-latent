@@ -11,9 +11,10 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 class PairDataset(Dataset):
-    def __init__(self, data_root, size=256, random_crop=False):
+    def __init__(self, data_root, size=256, random_crop=False, max_instances=None):
         self.data_root = data_root
         self.size = size
+        self.max_instances = max_instances
         
         self.rescaler = T.Resize(size)
         self.cropper = T.RandomCrop((size, size)) if random_crop else T.CenterCrop((size, size))
@@ -35,6 +36,8 @@ class PairDataset(Dataset):
 
                 instance, _ = file.rsplit('_', 1)
 
+                if self.max_instances and instance not in self.instance_to_frames and len(self.instances) >= self.max_instances:
+                    continue
                 # Store the PATH string, NOT the loaded image
                 path = os.path.join(root, file)
                 
@@ -44,7 +47,8 @@ class PairDataset(Dataset):
                 self.instance_to_frames[instance].append(path)
                 self.num_frames += 1
                 
-        print(f"Found {self.num_frames} images across {len(self.instances)} instances")
+        print(f"all images loaded into memory! {len(self.instances)} instances, {self.num_frames} frames")
+        print(f"instances: {self.instances}")
     
     def __len__(self):
         return len(self.instances) * 100 # each epoch will just be num_instances pairs * 100 random pairs

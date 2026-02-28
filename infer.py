@@ -275,28 +275,28 @@ def create_detailed_visualization(image_a, image_b, generations, instance_id, po
 
 def main():
     parser = argparse.ArgumentParser(description="FlowMo Inference Script - Same Instance, Different Poses")
-    parser.add_argument("--checkpoint", type=str, required=True,
+    parser.add_argument("--checkpoint", type=str, default="/viscam/u/panglexi/flowmo-instance-latent/results/flowmo_vae_contrastive_shrink/checkpoints/00105000.pth",
                         help="Path to checkpoint file")
     parser.add_argument("--data-root", type=str, default="flowmo/dataset/images",
                         help="Root directory containing images")
-    parser.add_argument("--instance", type=str, required=True,
+    parser.add_argument("--instance", type=str, default="49",
                         help="Instance ID (e.g., '00')")
-    parser.add_argument("--pose-a", type=str, required=True,
+    parser.add_argument("--pose-a", type=str, default="000",
                         help="First pose ID (e.g., '000')")
-    parser.add_argument("--pose-b", type=str, required=True,
+    parser.add_argument("--pose-b", type=str, default="100",
                         help="Second pose ID (e.g., '001')")
-    parser.add_argument("--output-dir", type=str, default="inference_outputs",
+    parser.add_argument("--output-dir", type=str, default="inference_outputs_lexi4",
                         help="Directory to save visualizations")
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to run inference on")
     parser.add_argument("--use-ema", action=argparse.BooleanOptionalAction, default=True,
                         help="Use EMA model weights (use --no-use-ema to disable)")
     parser.add_argument("--config", type=str, 
-                        default="results/flowmo_instance_pretrain/config.yaml",
+                        default="/viscam/u/panglexi/flowmo-instance-latent/results/flowmo_vae_contrastive_shrink/config.yaml",
                         help="Path to config file (use training config for matching architecture)")
     parser.add_argument("--interpolate", action="store_true",
                         help="Run pose interpolation between the two poses")
-    parser.add_argument("--interpolate-steps", type=int, default=5,
+    parser.add_argument("--interpolate-steps", type=int, default=10,
                         help="Number of interpolation steps (including endpoints)")
     args = parser.parse_args()
     
@@ -309,7 +309,7 @@ def main():
     config = OmegaConf.load(args.config)
     print(f"Model config: mup_width={config.model.mup_width}, patch_size={config.model.patch_size}")
     model = build_model_for_inference(config)
-    model = model.to(device)
+    model = model.to(device)    
     model.eval()
     
     # Load checkpoint

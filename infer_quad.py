@@ -301,26 +301,26 @@ def create_diagnostic_grid(images, generated, instances, poses, save_path):
 
 def main():
     parser = argparse.ArgumentParser(description="FlowMo Quad Inference - 4 Images, All Combinations")
-    parser.add_argument("--checkpoint", type=str, required=True,
+    parser.add_argument("--checkpoint", type=str, default="/viscam/u/panglexi/flowmo-instance-latent/results/flowmo_vae_contrastive_shrink/checkpoints/00105000.pth",
                         help="Path to checkpoint file")
     parser.add_argument("--data-root", type=str, default="flowmo/dataset/images",
                         help="Root directory containing images")
-    parser.add_argument("--instance-1", type=str, required=True,
+    parser.add_argument("--instance-1", type=str, default="25",
                         help="First instance ID (e.g., '00')")
-    parser.add_argument("--instance-2", type=str, required=True,
+    parser.add_argument("--instance-2", type=str, default="21",
                         help="Second instance ID (e.g., '05')")
-    parser.add_argument("--pose-1", type=str, required=True,
+    parser.add_argument("--pose-1", type=str, default="000",
                         help="First pose ID (e.g., '000')")
-    parser.add_argument("--pose-2", type=str, required=True,
+    parser.add_argument("--pose-2", type=str, default="100",
                         help="Second pose ID (e.g., '100')")
-    parser.add_argument("--output-dir", type=str, default="inference_quad_outputs",
+    parser.add_argument("--output-dir", type=str, default="inference_quad_outputs_lexi",
                         help="Directory to save visualizations")
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to run inference on")
     parser.add_argument("--use-ema", action=argparse.BooleanOptionalAction, default=True,
                         help="Use EMA model weights (use --no-use-ema to disable)")
     parser.add_argument("--config", type=str, 
-                        default="results/flowmo_instance_pretrain/config.yaml",
+                        default="results/flowmo_vae_contrastive_shrink/config.yaml",
                         help="Path to config file (use training config for matching architecture)")
     args = parser.parse_args()
     

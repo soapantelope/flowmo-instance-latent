@@ -20,6 +20,7 @@ from flowmo import data, models
 
 def get_args_and_unknown():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config-path", type=str, default="flowmo/configs/base.yaml")
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default="my_experiment")
     parser.add_argument("--resume-from-ckpt", type=str, default="")
@@ -60,7 +61,8 @@ def restore_config(config):
 def get_args_and_config():
     args, unknown = get_args_and_unknown()
 
-    config = OmegaConf.load("flowmo/configs/base.yaml")
+    print(f"Loading config from {args.config_path}...")
+    config = OmegaConf.load(args.config_path)
     OmegaConf.set_struct(config, True)
     cli = OmegaConf.from_dotlist(unknown)
     config = OmegaConf.merge(config, cli)
@@ -101,6 +103,7 @@ def load_dataset(config, split, shuffle_val=False):
             config.data.pair_dataset_root,
             size=config.data.image_size,
             random_crop=(split == "train"),
+            max_instances=getattr(config.data, 'max_instances', None),
         )
         return DataLoader(
             dataset,
