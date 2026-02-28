@@ -101,6 +101,8 @@ def load_dataset(config, split, shuffle_val=False):
             config.data.pair_dataset_root,
             size=config.data.image_size,
             random_crop=(split == "train"),
+            max_instances=getattr(config.data, 'max_instances', None),
+            max_poses_per_instance=getattr(config.data, 'max_poses_per_instance', None),
         )
         return DataLoader(
             dataset,

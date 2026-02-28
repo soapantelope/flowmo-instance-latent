@@ -5,6 +5,8 @@ data:
   eval_batch_size: 5
   image_size: 256
   num_workers: 8
+  max_instances: 2
+  max_poses_per_instance: 200
 
   imagenet_train_index: "imagenet_train_index_overall.json"
   imagenet_train_tar: "ILSVRC2012_img_train.tar"
@@ -15,9 +17,9 @@ data:
 
 model:
   enable_mup: True
-  patch_size: 4
-  mup_width: 6
-  enc_mup_width: 4
+  patch_size: 16
+  mup_width: 2
+  enc_mup_width: 2
 
   fix_initial_norms: True
   fix_norm_mode: l2
@@ -33,11 +35,11 @@ model:
   entropy_loss_weight: 0.0025
   commit_loss_weight: 0.000625
 
-  enc_depth: 8
-  dec_depth: 16
+  enc_depth: 4
+  dec_depth: 8
   enable_cfg: True
 
-  infonce_temp: 0.3
+  infonce_temp: 0.07
   infonce_weight: 1.0
 
   ema_decay: 0.9999
@@ -49,7 +51,7 @@ model:
 opt:
   # Floats need to be specified with decimals to get loaded as such
   lr: 1.0e-4
-  n_grad_acc: 2
+  n_grad_acc: 1
   schedule: fat_lognormal
   freeze_encoder: False
   freeze_encoder_after: 200000
@@ -58,17 +60,17 @@ opt:
   lpips_weight: 0.1
   lpips_mode: "vgg"
   pose_kl_weight: 0.01 # only used when pose_quantization_type is kl (per-dimension, since KL uses mean not sum)
-  pose_kl_anneal_steps: 100000 # linearly ramp KL weight from 0 to pose_kl_weight over this many steps (0 = no annealing)
+  pose_kl_anneal_steps: 25000 # linearly ramp KL weight from 0 to pose_kl_weight over this many steps (0 = no annealing)
 
   beta1: .9
   beta2: .95
 
 trainer:
   enable_bfloat16: True
-  log_every: 100
-  checkpoint_every: 5000
+  log_every: 50
+  checkpoint_every: 1000
   max_steps: 10000000000000
-  keep_every: 200000
+  keep_every: 50000
   gs_checkpoint_bucket: ""
 
 eval:
