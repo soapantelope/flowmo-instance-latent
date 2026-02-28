@@ -18,7 +18,7 @@ data:
 model:
   enable_mup: True
   patch_size: 16
-  mup_width: 2
+  mup_width: 4
   enc_mup_width: 2
 
   fix_initial_norms: True
