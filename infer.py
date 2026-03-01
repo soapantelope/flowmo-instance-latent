@@ -189,7 +189,7 @@ def create_interpolation_visualization(image_a, image_b, interpolated_images, in
                  fontsize=14, y=0.98)
     
     fig.text(0.5, 0.02, 
-             "Bottom row: Generated images with fixed instance (from A) and linearly interpolated pose latent",
+             "Bottom row: Generated images with fixed instance (from A) and spherically interpolated pose latent",
              ha='center', fontsize=10, style='italic')
     
     plt.tight_layout(rect=[0, 0.05, 1, 0.93])

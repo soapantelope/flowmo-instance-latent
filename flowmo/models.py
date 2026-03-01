@@ -909,12 +909,11 @@ class FlowMo(nn.Module):
             
             interpolated_images = []
             alphas = torch.linspace(0, 1, num_steps, device=pose_code_a.device)
+            z = torch.randn((1, 3, h, w)).cuda()
             
             for alpha in alphas:
                 pose_code = _slerp(pose_code_a, pose_code_b, alpha)
                 code = torch.cat([instance_code, pose_code], dim=-1)
-                
-                z = torch.randn((1, 3, h, w)).cuda()
                 mask = torch.ones_like(code[..., :1])
                 code = torch.concatenate([code * mask, mask], axis=-1)
                 
