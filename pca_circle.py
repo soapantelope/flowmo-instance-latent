@@ -45,7 +45,7 @@ def load_all_images(data_root, size=256):
 
 
 def encode_all_poses(model, instances, batch_size=16):
-    """Encode pose codes for all images. Returns (codes [N, dim], labels [N], instance_ids [N])."""
+    """Encode pose codes for all images. Returns (codes [N, code_length*pose_dim], labels [N], instance_ids [N])."""
     all_codes = []
     all_labels = []
     all_instance_ids = []
@@ -58,8 +58,8 @@ def encode_all_poses(model, instances, batch_size=16):
             batch = images[i:i + batch_size].cuda()
             with torch.no_grad():
                 pose_code = model.encode_pose(batch)  # [B, code_length, pose_dim]
-            code_mean = pose_code.mean(dim=1)  # [B, pose_dim]
-            all_codes.append(code_mean.cpu())
+            code_flat = pose_code.flatten(1)  # [B, code_length * pose_dim]
+            all_codes.append(code_flat.cpu())
             all_labels.extend(pose_ids[i:i + batch_size])
             all_instance_ids.extend([instance_id] * len(batch))
 
@@ -239,10 +239,11 @@ def main():
     create_pca_scatter(codes, instance_ids, pca, circle_2d,
                        os.path.join(args.output_dir, "pca_scatter.png"))
 
-    # 5. Tile synthetic pose codes to [N, code_length, pose_dim]
+    # 5. Reshape synthetic pose codes to [N, code_length, pose_dim]
     code_length = config.model.code_length
+    pose_dim = config.model.pose_context_dim
     circle_codes = torch.from_numpy(circle_full).float().cuda()
-    circle_codes = circle_codes.unsqueeze(1).expand(-1, code_length, -1)  # [N, code_length, pose_dim]
+    circle_codes = circle_codes.reshape(-1, code_length, pose_dim)  # [N, code_length, pose_dim]
 
     # 6. Encode instance
     print(f"Encoding instance from: {args.instance_image}")
