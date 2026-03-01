@@ -131,32 +131,38 @@ def create_pca_scatter(codes, instance_ids, pca, circle_points_2d, save_path):
 
 
 def create_circle_visualization(images, angles, save_path):
-    """Arrange generated images in a circle layout using inset axes for pixel-perfect rendering."""
+    """Arrange generated images in a circle layout, sized so images don't overlap."""
     n = len(images)
-    # Scale figure and image size based on number of images
-    # Circumference = 2*pi*r; each image needs ~(2*pi*r)/n space
-    # We want images to just barely not overlap
-    img_frac = min(0.09, 0.7 / (n / (2 * np.pi)))  # fraction of figure size per image
-    radius = 0.38  # radius in figure coordinates (0-1)
-    fig_size = max(20, int(n * 0.5))
 
-    fig = plt.figure(figsize=(fig_size, fig_size))
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.set_xlim(-0.55, 0.55)
-    ax.set_ylim(-0.55, 0.55)
+    # Each image subtends an arc of 2*pi/n. To avoid overlap, the image side
+    # length must be at most the chord length between adjacent points:
+    #   chord = 2 * R * sin(pi / n)
+    # We pick R so that the chord equals a comfortable image size in inches,
+    # then derive the figure size from R.
+    img_inches = 1.5  # desired image size in inches
+    if n > 1:
+        R = img_inches / (2 * np.sin(np.pi / n)) * 1.15  # 15% extra breathing room
+    else:
+        R = img_inches * 2
+    margin = img_inches  # space around the circle for labels
+    fig_size = 2 * (R + margin)
+
+    fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+    lim = R + margin
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
     ax.set_aspect('equal')
     ax.axis('off')
 
-    for i, (img, angle) in enumerate(zip(images, angles)):
-        x = radius * np.cos(angle)
-        y = radius * np.sin(angle)
+    half = img_inches / 2
+    for img, angle in zip(images, angles):
+        x = R * np.cos(angle)
+        y = R * np.sin(angle)
 
         img_np = tensor_to_display(img).transpose(1, 2, 0)
-        half = img_frac / 2
-        extent = [x - half, x + half, y - half, y + half]
-        ax.imshow(img_np, extent=extent, zorder=2)
+        ax.imshow(img_np, extent=[x - half, x + half, y - half, y + half], zorder=2)
 
-    ax.set_title('Generated images along PCA circle', fontsize=20, pad=30, y=0.52)
+    ax.set_title('Generated images along PCA circle', fontsize=18, pad=20)
     plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"Saved circle visualization: {save_path}")
