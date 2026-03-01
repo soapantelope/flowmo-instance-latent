@@ -131,31 +131,33 @@ def create_pca_scatter(codes, instance_ids, pca, circle_points_2d, save_path):
 
 
 def create_circle_visualization(images, angles, save_path):
-    """Arrange generated images in a circle layout."""
+    """Arrange generated images in a circle layout using inset axes for pixel-perfect rendering."""
     n = len(images)
-    fig_size = 16
-    img_size = 0.12
+    # Scale figure and image size based on number of images
+    # Circumference = 2*pi*r; each image needs ~(2*pi*r)/n space
+    # We want images to just barely not overlap
+    img_frac = min(0.09, 0.7 / (n / (2 * np.pi)))  # fraction of figure size per image
+    radius = 0.38  # radius in figure coordinates (0-1)
+    fig_size = max(20, int(n * 0.5))
 
-    fig, ax = plt.subplots(figsize=(fig_size, fig_size))
-    ax.set_xlim(-1.4, 1.4)
-    ax.set_ylim(-1.4, 1.4)
+    fig = plt.figure(figsize=(fig_size, fig_size))
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(-0.55, 0.55)
+    ax.set_ylim(-0.55, 0.55)
     ax.set_aspect('equal')
     ax.axis('off')
-    ax.set_title('Generated images along PCA circle', fontsize=16, pad=20)
 
     for i, (img, angle) in enumerate(zip(images, angles)):
-        x = np.cos(angle)
-        y = np.sin(angle)
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
 
         img_np = tensor_to_display(img).transpose(1, 2, 0)
-        extent = [x - img_size, x + img_size, y - img_size, y + img_size]
+        half = img_frac / 2
+        extent = [x - half, x + half, y - half, y + half]
         ax.imshow(img_np, extent=extent, zorder=2)
 
-        deg = np.degrees(angle)
-        ax.text(x, y - img_size - 0.03, f"{deg:.0f}", ha='center', va='top', fontsize=6)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    ax.set_title('Generated images along PCA circle', fontsize=20, pad=30, y=0.52)
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"Saved circle visualization: {save_path}")
 
